@@ -1,0 +1,60 @@
+#include "AsyncExecutor.h"
+#include "utils/logger.h"
+
+AsyncExecutor *AsyncExecutor::instance = nullptr;
+
+void AsyncExecutor::pushForDeleteInternal(GuiElement *ptr) {
+    deleteListMutex.lock();
+    deleteList.push(ptr);
+    deleteListMutex.unlock();
+}
+
+AsyncExecutor::AsyncExecutor() {
+    thread = new std::thread([&]() {
+        while (!exitThread) {
+            mutex.lock();
+            bool emptyList = elements.empty();
+            auto it        = elements.begin();
+            while (it != elements.end()) {
+                auto future = it;
+                auto status = future->wait_for(std::chrono::seconds(0));
+                if (status == std::future_status::ready) {
+                    it = elements.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (!emptyList && elements.empty()) {
+                log_printf("All tasks are done");
+            }
+            mutex.unlock();
+            deleteListMutex.lock();
+            while (!deleteList.empty()) {
+                GuiElement *ptr = deleteList.front();
+                deleteList.pop();
+                delete ptr;
+            }
+            deleteListMutex.unlock();
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            DCFlushRange((void *) &exitThread, sizeof(exitThread));
+        }
+    });
+}
+
+AsyncExecutor::~AsyncExecutor() {
+    exitThread = true;
+    DCFlushRange((void *) &exitThread, sizeof(exitThread));
+    thread->join();
+}
+
+void AsyncExecutor::executeInternal(std::function<void()> func) {
+    if (elements.size() > 10) {
+        log_printf("Warning, many tasks running currently");
+        //std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+    log_printf("Add new task");
+    mutex.lock();
+    elements.push_back(std::async(std::launch::async, func));
+    mutex.unlock();
+}
