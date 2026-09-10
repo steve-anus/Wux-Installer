@@ -150,8 +150,6 @@ private:
     std::vector<GuiElement *> drcElements;
     std::vector<GuiElement *> tvElements;
 
-    GuiParticleImage bgParticleImg;
-	
 	GuiImageData *splashImgData;
     GuiImage splashImg;
 	
@@ -177,6 +175,8 @@ private:
     GuiButton *wuxButton;
     GuiText *wuxLabel;
     GuiTrigger wuxTrigger;
+    GuiTrigger wuxTouchTrigger;
+    GuiImage *wuxButtonImage;
 };
 
 #endif //_MAIN_WINDOW_H_

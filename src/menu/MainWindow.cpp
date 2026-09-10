@@ -28,18 +28,18 @@
 MainWindow::MainWindow(int w, int h)
 	: width(w)
 	, height(h)
-	, bgParticleImg(w, h, 500)
 	, splashImgData(Resources::GetImageData("splash.png"))
 	, splashImg(splashImgData)
 	, titleImgData(Resources::GetImageData("titleHeader.png"))
 	, titleImg(titleImgData)
-	, titleText("WUP Installer GX2")
-	, versionText(WUP_GX2_VERSION)
+	, titleText("Wux Installer")
+	, versionText("V1.0")
 {
 	folderList = NULL;
 	installWindow = NULL;
 	wuxButton = NULL;
 	wuxLabel = NULL;
+	wuxButtonImage = NULL;
 	
 	for(int i = 0; i < 4; i++)
 	{
@@ -57,7 +57,6 @@ MainWindow::MainWindow(int w, int h)
 
 MainWindow::~MainWindow()
 {
-	remove(&bgParticleImg);
 	Resources::RemoveImageData(splashImgData);
 	Resources::RemoveImageData(titleImgData);
 	
@@ -79,6 +78,7 @@ MainWindow::~MainWindow()
 	
 	delete wuxButton;
 	delete wuxLabel;
+	delete wuxButtonImage;
 
 	if(folderList != NULL)
 		delete folderList;
@@ -194,23 +194,27 @@ void MainWindow::SetupMainView()
 	currentDrcFrame->setEffect(EFFECT_FADE, 10, 255);
 	currentDrcFrame->setState(GuiElement::STATE_DISABLED);
 	currentDrcFrame->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
-	currentDrcFrame->append(&bgParticleImg);
 	
 	SetBrowserWindow();
 	SetDrcHeader();
 
 	// "Install WUX": extract a .wux from /wudump into /install (JWUDTool layout).
-	wuxTrigger.setTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A);
-	wuxLabel = new GuiText("Install WUX", 30, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-	wuxButton = new GuiButton(280, 60);
+	wuxButtonImage = new GuiImage(600, 120, (GX2Color){ 42, 159, 217, 255 });
+	wuxLabel = new GuiText("Install WUX", 48, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+	wuxLabel->setAlignment(ALIGN_CENTERED);
+	wuxButton = new GuiButton(600, 120);
+	wuxButton->setImage(wuxButtonImage);
 	wuxButton->setLabel(wuxLabel);
+	wuxButton->setAlignment(ALIGN_CENTERED);
+	wuxButton->setPosition(0, 0);
+	wuxTrigger.setTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A);
+	wuxTrigger.setClickEverywhere(true);
+	wuxTouchTrigger.setTrigger(GuiTrigger::CHANNEL_1, GuiTrigger::VPAD_TOUCH);
 	wuxButton->setTrigger(&wuxTrigger);
-	wuxButton->setAlignment(ALIGN_CENTER | ALIGN_BOTTOM);
-	wuxButton->setPosition(0, -20);
+	wuxButton->setTrigger(&wuxTouchTrigger);
 	wuxButton->clicked.connect(this, &MainWindow::OnWuxInstallClicked);
 	currentDrcFrame->append(wuxButton);
-	// An empty /install is a normal starting state, not an error: the user
-	// extracts a .wux via the "Install WUX" button, which rebuilds the browser
+	// An empty /install is a normal starting state. The user extracts a .wux via the "Install WUX" button, which rebuilds the browser
 	// afterwards (see RunWuxInstall). Do not show an error or exit here.
 
 	append(currentDrcFrame);
@@ -228,7 +232,7 @@ void MainWindow::SetDrcHeader()
 	versionText.setPosition(-15, -40);
 	versionText.setBlurGlowColor(5.0f, glm::vec4(0.0, 0.0, 0.0f, 1.0f));
 	versionText.setAlignment(ALIGN_RIGHT | ALIGN_TOP);
-	versionText.setTextf("%s (Aroma)", WUP_GX2_VERSION);
+	versionText.setText("V1.0");
 	
 	headerFrame.setSize(titleImg.getWidth(), titleImg.getHeight());
 	headerFrame.setPosition(0, 310);
