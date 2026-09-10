@@ -35,7 +35,9 @@
 namespace wux {
 namespace {
 
-// Read an entire (small) file into out.
+// Read a whole file into `out`, in 64 KB chunks, so the file's total size is
+// not limited by the buffer. Used only for small files (the 16-byte game.key);
+// the multi-GB .wux is streamed separately by WuxContainer, never read whole.
 Error readWhole(const char* path, std::vector<U8>& out) {
     int fd = ::open(path, O_RDONLY);
     if (fd < 0) return Error::IoError;

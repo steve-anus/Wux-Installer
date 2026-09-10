@@ -209,20 +209,10 @@ void MainWindow::SetupMainView()
 	wuxButton->setPosition(0, -20);
 	wuxButton->clicked.connect(this, &MainWindow::OnWuxInstallClicked);
 	currentDrcFrame->append(wuxButton);
+	// An empty /install is a normal starting state, not an error: the user
+	// extracts a .wux via the "Install WUX" button, which rebuilds the browser
+	// afterwards (see RunWuxInstall). Do not show an error or exit here.
 
-	if(folderList == NULL)
-	{
-		MessageBox * messageBox = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONERROR, false);
-		messageBox->setState(GuiElement::STATE_DISABLED);
-		messageBox->setEffect(EFFECT_FADE, 10, 255);
-		messageBox->setTitle("Error:");
-		messageBox->setMessage1("No installable content found.");
-		messageBox->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
-		messageBox->messageOkClicked.connect(this, &MainWindow::OnErrorMessageBoxClick);
-		
-		currentDrcFrame->append(messageBox);
-	}
-	
 	append(currentDrcFrame);
 }
 
@@ -346,8 +336,22 @@ void MainWindow::RunWuxInstall()
 
 	if (err == wux::Error::Ok && result.ok)
 	{
-		if (folderList)
-			folderList->Get();
+		// Rebuild the browser so the newly extracted title can be installed. The
+		// initial scan may have left browserWindow/folderList NULL when /install
+		// was empty, so (re)create them here.
+		if (browserWindow)
+		{
+			currentDrcFrame->remove(browserWindow);
+			AsyncDeleter::pushForDelete(browserWindow);
+			browserWindow = NULL;
+		}
+		if (folderList == NULL)
+			folderList = new CFolderList();
+		folderList->Get();
+		SetBrowserWindow();
+		currentDrcFrame->bringToFront(&headerFrame);
+		currentDrcFrame->bringToFront(wuxButton);
+
 		ShowWuxResult("Extracted to " + result.outDir +
 		              ". Select it in the browser to install.", true);
 	}
