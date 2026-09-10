@@ -20,7 +20,10 @@
 #include "Application.h"
 #include "utils/StringTools.h"
 #include "common/common.h"
+#include "common/fs_defs.h"
+#include "fs/DirList.h"
 #include "gui/MessageBox.h"
+#include "wux/wux_installer.h"
 
 MainWindow::MainWindow(int w, int h)
 	: width(w)
@@ -35,6 +38,8 @@ MainWindow::MainWindow(int w, int h)
 {
 	folderList = NULL;
 	installWindow = NULL;
+	wuxButton = NULL;
+	wuxLabel = NULL;
 	
 	for(int i = 0; i < 4; i++)
 	{
@@ -72,6 +77,9 @@ MainWindow::~MainWindow()
 		Resources::RemoveImageData(pointerImgData[i]);
 	}
 	
+	delete wuxButton;
+	delete wuxLabel;
+
 	if(folderList != NULL)
 		delete folderList;
 
@@ -190,7 +198,18 @@ void MainWindow::SetupMainView()
 	
 	SetBrowserWindow();
 	SetDrcHeader();
-	
+
+	// "Install WUX": extract a .wux from /wudump into /install (JWUDTool layout).
+	wuxTrigger.setTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A);
+	wuxLabel = new GuiText("Install WUX", 30, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+	wuxButton = new GuiButton(280, 60);
+	wuxButton->setLabel(wuxLabel);
+	wuxButton->setTrigger(&wuxTrigger);
+	wuxButton->setAlignment(ALIGN_CENTER | ALIGN_BOTTOM);
+	wuxButton->setPosition(0, -20);
+	wuxButton->clicked.connect(this, &MainWindow::OnWuxInstallClicked);
+	currentDrcFrame->append(wuxButton);
+
 	if(folderList == NULL)
 	{
 		MessageBox * messageBox = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONERROR, false);
@@ -297,5 +316,64 @@ void MainWindow::OnCloseEffectFinish(GuiElement *element)
 {
 	//! remove element from draw list and push to delete queue
 	remove(element);
+	AsyncDeleter::pushForDelete(element);
+}
+
+void MainWindow::OnWuxInstallClicked(GuiButton *button, const GuiController *controller,
+                                     GuiTrigger *trigger)
+{
+	// Runs on the main thread for now; add a worker thread with progress window later
+	RunWuxInstall();
+}
+
+void MainWindow::RunWuxInstall()
+{
+	// Locate a .wux image and its game.key in the wudump folder.
+	DirList dl(SD_WUDUMP_PATH, ".wux", DirList::Files);
+	if (dl.GetFilecount() == 0)
+	{
+		ShowWuxResult("No .wux image found in /wudump.", false);
+		return;
+	}
+
+	std::string wuxPath = std::string(SD_WUDUMP_PATH) + "/" + dl.GetFilename(0);
+	std::string keyPath = std::string(SD_WUDUMP_PATH) + "/game.key";
+
+	wux::WuxInstaller installer;
+	wux::ExtractResult result;
+	wux::Error err = installer.extract(wuxPath.c_str(), keyPath.c_str(),
+	                                   SD_INSTALL_PATH, result);
+
+	if (err == wux::Error::Ok && result.ok)
+	{
+		if (folderList)
+			folderList->Get();
+		ShowWuxResult("Extracted to " + result.outDir +
+		              ". Select it in the browser to install.", true);
+	}
+	else
+	{
+		ShowWuxResult(result.error.empty() ? std::string(wux::errorName(err))
+		                                  : result.error, false);
+	}
+}
+
+void MainWindow::ShowWuxResult(const std::string &msg, bool ok)
+{
+	MessageBox *box = new MessageBox(MessageBox::BT_OK,
+	                                 ok ? MessageBox::IT_ICONTRUE : MessageBox::IT_ICONERROR,
+	                                 false);
+	box->setState(GuiElement::STATE_DISABLED);
+	box->setEffect(EFFECT_FADE, 10, 255);
+	box->setTitle(ok ? "WUX extract:" : "WUX extract failed:");
+	box->setMessage1(msg);
+	box->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
+	box->messageOkClicked.connect(this, &MainWindow::OnWuxMessageBoxClick);
+	currentDrcFrame->append(box);
+}
+
+void MainWindow::OnWuxMessageBoxClick(GuiElement *element, int ok)
+{
+	currentDrcFrame->remove(element);
 	AsyncDeleter::pushForDelete(element);
 }

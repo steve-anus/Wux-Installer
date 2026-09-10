@@ -25,6 +25,7 @@
 #include "InstallWindow.h"
 #include "ErrorViewer.h"
 #include "gui/GuiParticleImage.h"
+#include "gui/GuiButton.h"
 #include "system/CMutex.h"
 
 class CVideo;
@@ -140,6 +141,10 @@ private:
 	void OnErrorMessageBoxClick(GuiElement *element, int ok);
 	void OnOpenEffectFinish(GuiElement *element);
 	void OnCloseEffectFinish(GuiElement *element);
+	void OnWuxInstallClicked(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void OnWuxMessageBoxClick(GuiElement *element, int ok);
+	void RunWuxInstall();
+	void ShowWuxResult(const std::string &msg, bool ok);
 	
 	int width, height;
     std::vector<GuiElement *> drcElements;
@@ -168,6 +173,10 @@ private:
     ErrorViewer * errorViewer;
 
     CMutex guiMutex;
+
+    GuiButton *wuxButton;
+    GuiText *wuxLabel;
+    GuiTrigger wuxTrigger;
 };
 
 #endif //_MAIN_WINDOW_H_

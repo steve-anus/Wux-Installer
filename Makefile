@@ -42,7 +42,8 @@ SOURCES			:= src \
 						src/system \
 						src/utils \
 						src/video \
-						src/video/shaders
+						src/video/shaders \
+						src/wux
 DATA			:= data	\
 						 data/images \
 						 data/fonts \
@@ -60,6 +61,7 @@ CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
 
 CXXFLAGS	:= $(CFLAGS)
+CXXFLAGS += -fstack-protector-strong   # stack canaries for src/wux (plan 5.5)
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-g $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
