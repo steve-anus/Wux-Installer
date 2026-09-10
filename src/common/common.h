@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#define WUP_GX2_VERSION			"v1.4"
+#define WUX_INSTALLER_VERSION		"V1.0"
 #ifdef __cplusplus
 }
 #endif

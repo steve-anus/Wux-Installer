@@ -13,7 +13,7 @@ int main(int argc, char** argv)
 	WPADEnableURCC(1);
 	
 	log_init();
-	log_printf("\nStarting WUP Installer GX2 %s\n", WUP_GX2_VERSION);
+	log_printf("\nStarting WUX Installer %s\n", WUX_INSTALLER_VERSION);
 
 	//! *******************************************************************
 	//! *                        Call our Main                            *
@@ -24,7 +24,7 @@ int main(int argc, char** argv)
 	//! *******************************************************************
 	//! *                            Exit                                 *
 	//! *******************************************************************
-	log_printf("WUP Installer GX2 exit...\n");
+	log_printf("WUX Installer exit...\n");
 	log_deinit();
 
 	return 0;
