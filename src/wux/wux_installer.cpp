@@ -67,6 +67,15 @@ Error writeWhole(const char* path, const U8* data, size_t len) {
     return Error::Ok;
 }
 
+// Create a directory, treating "already exists" as success. Relies on stat
+// rather than errno, since the console's mkdir may not set errno reliably.
+Error ensureDir(const char* path) {
+    struct stat st;
+    if (::stat(path, &st) == 0) return Error::Ok;      // already present
+    if (::mkdir(path, 0777) == 0) return Error::Ok;     // created
+    return ::stat(path, &st) == 0 ? Error::Ok : Error::IoError;
+}
+
 // Stream size bytes from the container into a file, one 32 KB sector at a time.
 Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
                    const char* path) {
@@ -274,9 +283,19 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
     }
     U64 gmOrigin = gm->offset + gmHeaderSize;
 
-    // 7. Output folder <outRoot>/<TITLEID>/.
+    // 7. Output folder <outRoot>/<TITLEID>/. Create the parent (e.g. /install)
+    //    first: mkdir does not create intermediate directories.
     std::string outDir = std::string(outRoot) + "/" + titleIdHex(tmd.titleID);
-    ::mkdir(outDir.c_str(), 0777);   // "already exists" is fine
+    Error dirErr = ensureDir(outRoot);
+    if (dirErr != Error::Ok) {
+        result.error = std::string("create ") + outRoot + ": " + errorName(dirErr);
+        return dirErr;
+    }
+    dirErr = ensureDir(outDir.c_str());
+    if (dirErr != Error::Ok) {
+        result.error = std::string("create ") + outDir + ": " + errorName(dirErr);
+        return dirErr;
+    }
 
     // 8. Each content: stream the raw (still-encrypted) bytes to <id8>.app, and
     //    the h3 block to <id8>.h3 when the content is hashed.
