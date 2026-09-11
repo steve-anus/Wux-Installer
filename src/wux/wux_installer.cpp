@@ -35,8 +35,7 @@
 namespace wux {
 namespace {
 
-// Read a whole file into `out`, in 64 KB chunks, so the file's total size is
-// not limited by the buffer. Used only for small files (the 16-byte game.key);
+// Read a whole file into `out`, in 64 KB chunks. Used only for small files (the 16-byte game.key);
 // the multi-GB .wux is streamed separately by WuxContainer, never read whole.
 Error readWhole(const char* path, std::vector<U8>& out) {
     int fd = ::open(path, O_RDONLY);
@@ -51,6 +50,58 @@ Error readWhole(const char* path, std::vector<U8>& out) {
     }
     ::close(fd);
     return Error::Ok;
+}
+
+// Hex digit value (0-15), or -1 if not a hex digit.
+int hexVal(U8 c) {
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
+    return -1;
+}
+
+// Read a key file into a 16-byte key. Accepts either 16 raw bytes, or a
+// 32-char ASCII hex string. ASCII whitespace is ignored. On success key holds exactly 16 bytes.
+Error parseKeyFile(const char* path, std::vector<U8>& key) {
+    std::vector<U8> raw;
+    Error e = readWhole(path, raw);
+    if (e != Error::Ok) return e;
+    std::vector<U8> clean;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        U8 b = raw[i];
+        if (b == ' ' || b == '\t' || b == '\r' || b == '\n') continue;
+        clean.push_back(b);
+    }
+    key.clear();
+    if (clean.size() == 16) {
+        key.assign(clean.begin(), clean.end());
+        return Error::Ok;
+    }
+    if (clean.size() == 32) {
+        key.resize(16);
+        for (int i = 0; i < 16; ++i) {
+            int hi = hexVal(clean[2 * i]);
+            int lo = hexVal(clean[2 * i + 1]);
+            if (hi < 0 || lo < 0) { key.clear(); return Error::MissingKey; }
+            key[i] = (U8)((hi << 4) | lo);
+        }
+        return Error::Ok;
+    }
+    key.clear();
+    return Error::MissingKey;
+}
+
+// Case-insensitive ASCII equality (for partition names, whose casing can vary).
+bool eqUpper(const char* a, const std::string& b) {
+    size_t i = 0;
+    for (; a[i] != '\0' && i < b.size(); ++i) {
+        char ca = a[i];
+        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 'a' + 'A');
+        char cb = b[i];
+        if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 'a' + 'A');
+        if (ca != cb) return false;
+    }
+    return a[i] == '\0' && i == b.size();
 }
 
 // Write bytes to a file (creates or truncates).
@@ -170,16 +221,13 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         return e;
     }
 
-    // 2. Load the 16-byte title key.
+    // 2. Load the 16-byte title key (16 raw bytes, or a 32-char hex string).
     std::vector<U8> key;
-    e = readWhole(keyPath, key);
+    e = parseKeyFile(keyPath, key);
     if (e != Error::Ok) {
-        result.error = std::string("open game.key: ") + errorName(e);
+        result.error = std::string("read game.key: ") + errorName(e) +
+                       " (must be 16 raw bytes or a 32-char hex string)";
         return e;
-    }
-    if (key.size() != 16) {
-        result.error = "game.key must be exactly 16 bytes";
-        return Error::MissingKey;
     }
 
     // 3. Decrypt + parse the partition TOC.
@@ -248,13 +296,14 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         return e;
     }
 
-    // 6c. Match the GM partition: name = "GM" + the ticket's title ID.
+    // 6c. Match the GM partition: name = "GM" + the ticket's title ID
+    // (compared case-insensitively, since the on-disc casing can vary).
     std::string gmName = "GM";
     if (tik.size() >= 0x1DC + 8)
         gmName += hexUpper(readU64BE(tik.data() + 0x1DC), 16);
     const TocPartition* gm = nullptr;
     for (size_t i = 0; i < partitions.size(); ++i) {
-        if (std::string(partitions[i].name) == gmName) { gm = &partitions[i]; break; }
+        if (eqUpper(partitions[i].name, gmName)) { gm = &partitions[i]; break; }
     }
     if (!gm) {
         result.error = "GM partition not found: " + gmName;
@@ -271,11 +320,15 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
     U32 gmHeaderSize = readU32BE(gmHeader + 0x04);
     U32 gmFstSize = readU32BE(gmHeader + 0x14);
 
-    std::vector<U8> gmHeaderRaw(gmHeaderSize);
-    e = container.read(gm->offset, gmHeaderSize, gmHeaderRaw.data());
-    if (e != Error::Ok) {
-        result.error = std::string("GM header raw: ") + errorName(e);
-        return e;
+    // Read the h3 region (raw, at gmOffset + 0x40) for the .h3 files.
+    U32 gmH3ListSize = readU32BE(gmHeader + 0x0C);
+    std::vector<U8> gmH3Region(gmH3ListSize);
+    if (gmH3ListSize > 0) {
+        e = container.read(gm->offset + 0x40, gmH3ListSize, gmH3Region.data());
+        if (e != Error::Ok) {
+            result.error = std::string("GM h3 region: ") + errorName(e);
+            return e;
+        }
     }
     Fst gmFst;
     e = readFst(container, gm->offset + gmHeaderSize, gmFstSize, key.data(), gmFst);
@@ -329,8 +382,8 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
 
         if (c.hashed) {
             std::vector<U8> h3;
-            Error h3e = extractH3(gmHeaderRaw.data(), gmHeaderRaw.size(),
-                                  tmd.contents, c.index, h3);
+            Error h3e = extractH3(gmHeader, gmH3Region.data(), gmH3Region.size(),
+                                  c.index, h3);
             if (h3e == Error::Ok) {
                 e = writeWhole((outDir + "/" + id8 + ".h3").c_str(),
                                h3.data(), h3.size());

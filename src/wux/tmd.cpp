@@ -16,8 +16,6 @@
  */
 #include "wux/tmd.h"
 
-#include <algorithm>
-
 namespace wux {
 
 std::string hexUpper(U64 v, int digits) {
@@ -61,39 +59,33 @@ Error parseTmd(const U8* data, size_t len, Tmd& out) {
     return Error::Ok;
 }
 
-Error extractH3(const U8* header, size_t headerLen,
-                const std::vector<TmdContent>& contents, int index,
-                std::vector<U8>& out) {
-    if (header == nullptr || headerLen < 0x40)
+Error extractH3(const U8* header, const U8* h3Region, size_t h3RegionLen,
+                int index, std::vector<U8>& out) {
+    if (header == nullptr || h3Region == nullptr || index < 0)
+        return Error::Truncated;
+        
+    const U32 h3ListSize = readU32BE(header + 0x0C);
+    const U32 numArrays  = readU32BE(header + 0x10);
+    if (h3RegionLen < h3ListSize)
         return Error::Truncated;
 
-    U32 cnt = readU32BE(header + 0x10);
-    U64 start = 0x40 + (U64)cnt * 0x04;
-
-    // Hash entries are laid out in ascending content-index order.
-    std::vector<int> order;
-    order.reserve(contents.size());
-    for (size_t i = 0; i < contents.size(); ++i) order.push_back((int)i);
-    std::sort(order.begin(), order.end(),
-              [&](int a, int b) { return contents[a].index < contents[b].index; });
-
-    U64 acc = 0;
-    for (size_t k = 0; k < order.size(); ++k) {
-        const TmdContent& c = contents[order[k]];
-        if (!c.hashed || !c.encrypted) continue;
-
-        // One 0x14-byte hash per 0x1000 chunk of each 0x10000 of content.
-        U32 cntHashes = (U32)((c.encryptedFileSize / 0x10000) / 0x1000) + 1;
-        if ((int)c.index == index) {
-            U64 h3off = start + acc * 0x14;
-            U64 h3len = (U64)cntHashes * 0x14;
-            if (h3off + h3len > headerLen) return Error::Truncated;
-            out.assign(header + h3off, header + h3off + h3len);
-            return Error::Ok;
-        }
-        acc += cntHashes;
-    }
-    return Error::NotFound;
+    // H3HashArrayList: list position k holds the hash for content index k, built
+    // from table entry i = k + 1 (table entries i = 1 .. numArrays-1, each a u32
+    // offset into the region; the last entry ends at the region size).
+    const U32 i = (U32)index + 1;
+    if (i < 1 || i >= numArrays)
+        return Error::NotFound;
+    const U64 offPos = (U64)i * 0x04;
+    if (offPos + 4 > h3RegionLen)
+        return Error::Truncated;
+    const U32 curOffset = readU32BE(h3Region + offPos);
+    const U32 curEnd = (i < numArrays - 1)
+        ? readU32BE(h3Region + (U64)(i + 1) * 0x04)
+        : h3ListSize;
+    if ((U64)curOffset >= h3ListSize || (U64)curEnd > h3ListSize || curOffset > curEnd)
+        return Error::Truncated;
+    out.assign(h3Region + curOffset, h3Region + curEnd);
+    return Error::Ok;
 }
 
 } // namespace wux

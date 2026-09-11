@@ -44,11 +44,11 @@ struct Tmd {
 Error parseTmd(const U8* data, size_t len, Tmd& out);
 
 // Extract the .h3 hash block for the content with `index` from the raw GM
-// partition header. contents is the full TMD content list (any order); the
-// per-0x10000/0x1000 hash entries are laid out in ascending content-index order.
-Error extractH3(const U8* header, size_t headerLen,
-                const std::vector<TmdContent>& contents, int index,
-                std::vector<U8>& out);
+// volume header. header is the 0x40-byte volume
+// header (h3HashArrayListSize at +0x0C, numberOfH3HashArray at +0x10); h3Region
+// is the raw h3 data at (gmOffset + 0x40). On success out holds the .h3.
+Error extractH3(const U8* header, const U8* h3Region, size_t h3RegionLen,
+                int index, std::vector<U8>& out);
 
 // Format a 64-bit value as `digits` uppercase hex digits (no 0x prefix).
 std::string hexUpper(U64 v, int digits);
