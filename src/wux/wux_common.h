@@ -93,7 +93,7 @@ inline void makeOffsetIv(U64 fileOffsetBytes, U8 iv[16]) {
         iv[8 + i] = (U8)(v >> (8 * (7 - i)));
 }
 
-// ---- fixed format constants (verified against JNUSLib) -----
+// ---- fixed format constants -----
 namespace fmt {
     const U32 kSectorSize     = 0x8000;  // 32 KiB
     const U32 kTocOffset      = 0x18000; // decrypted-area sector

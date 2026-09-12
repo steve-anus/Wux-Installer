@@ -198,7 +198,8 @@ void MainWindow::SetupMainView()
 	SetBrowserWindow();
 	SetDrcHeader();
 
-	// "Install WUX": extract a .wux from /wudump into /install (JWUDTool layout).
+	// "Install WUX": extract a .wux from /wudump into /install/<TITLEID>/ and
+	// hand the result to the installer.
 	wuxButtonImage = new GuiImage(600, 120, (GX2Color){ 42, 159, 217, 255 });
 	wuxLabel = new GuiText("Install WUX", 48, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
 	wuxLabel->setAlignment(ALIGN_CENTERED);
@@ -340,24 +341,31 @@ void MainWindow::RunWuxInstall()
 
 	if (err == wux::Error::Ok && result.ok)
 	{
-		// Rebuild the browser so the newly extracted title can be installed. The
-		// initial scan may have left browserWindow/folderList NULL when /install
-		// was empty, so (re)create them here.
+		// Refresh the folder list and select every extracted folder so the
+		// installer runs without the user navigating the browser. A disc can
+		// yield several titles (e.g. the game plus the rear.rpx dummy).
+		if (folderList == NULL)
+			folderList = new CFolderList();
+		folderList->Get();
+		for (size_t d = 0; d < result.outDirs.size(); ++d)
+		{
+			const std::string& outDir = result.outDirs[d];
+			std::string name = outDir.substr(outDir.find_last_of('/') + 1);
+			for (int i = 0; i < folderList->GetCount(); ++i)
+				if (folderList->GetName(i) == name) { folderList->Select(i); break; }
+		}
+
+		// Hand the selected folders to the installer by code: the same
+		// InstallWindow the browser button uses, which shows its own confirm
+		// dialog and then MCP-installs each selected folder.
 		if (browserWindow)
 		{
 			currentDrcFrame->remove(browserWindow);
 			AsyncDeleter::pushForDelete(browserWindow);
 			browserWindow = NULL;
 		}
-		if (folderList == NULL)
-			folderList = new CFolderList();
-		folderList->Get();
-		SetBrowserWindow();
-		currentDrcFrame->bringToFront(&headerFrame);
-		currentDrcFrame->bringToFront(wuxButton);
-
-		ShowWuxResult("Extracted to " + result.outDir +
-		              ". Select it in the browser to install.", true);
+		installWindow = new InstallWindow(folderList, false);
+		installWindow->installWindowClosed.connect(this, &MainWindow::OnInstallWindowClosed);
 	}
 	else
 	{

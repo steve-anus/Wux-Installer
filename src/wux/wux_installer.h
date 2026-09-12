@@ -19,16 +19,21 @@
 
 #include "wux/wux_common.h"
 #include <string>
+#include <vector>
 
 namespace wux {
 
-// Result of a .wux extraction.
+// Result of a .wux extraction. A disc can hold several titles (e.g. the game
+// plus the 00050010-10060000 "rear.rpx" dummy); one folder is produced per
+// title and all of them are installable.
 struct ExtractResult {
     bool ok = false;
-    U64 titleID = 0;
-    std::string outDir;     // absolute path to <outRoot>/<TITLEID>/
-    int contentCount = 0;
-    std::string error;      // human-readable reason on failure
+    U64 titleID = 0;                // first extracted title
+    std::string outDir;             // first title's folder
+    int contentCount = 0;           // content files across all titles
+    std::string error;              // human-readable reason on failure
+    std::vector<std::string> outDirs;   // all <outRoot>/<TITLEID> folders
+    int titleCount = 0;
 };
 
 // Progress callback, called once per content file before it is written:
@@ -37,10 +42,7 @@ typedef void (*ProgressFn)(int cur, int total, U32 contentId, void* user);
 
 class WuxInstaller {
 public:
-    // Extract the .wux at wuxPath (title key at keyPath) into outRoot/<TITLEID>/
-    // using the JWUDTool layout: raw still-encrypted <id8>.app, <id8>.h3 for
-    // hashed content, plus the decrypted title.tmd / title.tik / title.cert.
-    // The completed folder is then installable by the fork's existing MCP flow.
+    // Extract every title found in the .wux at wuxPath (title key at keyPath) into outRoot/<TITLEID>/
     Error extract(const char* wuxPath, const char* keyPath, const char* outRoot,
                   ExtractResult& result,
                   ProgressFn progress = nullptr, void* progressUser = nullptr);
