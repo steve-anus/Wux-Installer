@@ -333,10 +333,12 @@ void MainWindow::RunWuxInstall()
 
 	std::string wuxPath = std::string(SD_WUDUMP_PATH) + "/" + dl.GetFilename(0);
 	std::string keyPath = std::string(SD_WUDUMP_PATH) + "/game.key";
+	std::string commonKeyPath = std::string(SD_WUDUMP_PATH) + "/common.key";
 
 	wux::WuxInstaller installer;
 	wux::ExtractResult result;
 	wux::Error err = installer.extract(wuxPath.c_str(), keyPath.c_str(),
+	                                   commonKeyPath.c_str(),
 	                                   SD_INSTALL_PATH, result);
 
 	if (err == wux::Error::Ok && result.ok)

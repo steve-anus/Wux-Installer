@@ -3,6 +3,8 @@
  *
  *
  ******************************Layout*********************************************
+ *                                                                               *
+ *                                                                               *
  *   header:    "FST\0" (4), sectionBlockSize (u32 @4), numberOfSections (u32 @8)*
  *   sections:  32 bytes each @0x20: address (u32, volume blocks), size (u32,    *
  *              volume blocks), ownerID (u64), groupID (u32), hashMode (1)       *
@@ -14,6 +16,8 @@
  *              +0x0E section number (== TMD content index)                      *
  *   strings:   at (nodes + lastEntryNumber * 16), null-terminated,              *
  *              address 0 =  empty (root) name                                   *
+ *                                                                               *
+ *                                                                               *
  *********************************************************************************
  *
  * 

@@ -2,9 +2,16 @@
  * wuxinstaller - .wux extraction pipeline implementation.
  *
  * Pipeline (per title found in the image):
- *   open .wux + load game.key -> decrypt TOC -> SI partition FST -> per-title
- *   TMD/TIK/CERT -> GM partition header (h3) + FST -> stream raw content to
- *   <outRoot>/<TITLEID>/   ;  A disc holds one SI folder (and one GM partition) per title; every title is extracted.
+ *   open .wux + load game.key + common.key -> decrypt TOC -> SI partition FST
+ *   -> per-title TMD/TIK/CERT -> derive the title content key (ticket + common
+ *   key) -> GM partition header (h3) + FST (content key) -> stream raw content
+ *   to <outRoot>/<TITLEID>/   ;  A disc holds one SI folder (and one GM
+ *   partition) per title; every title is extracted.
+ *
+ * game.key (the disc key) decrypts the disc structure: the TOC, the SI/data FST,
+ * and the TIK/TMD/CERT. Each GM FST is NUS content 0, encrypted with that
+ * title's content key (derived from its ticket + the common key); the .app
+ * content is written raw (still encrypted).
  *
  * FST blobs are read in fixed 64 KiB chunks and each chunk is AES-CBC
  * decrypted with a zero IV, so an FST size that is not a multiple of 16 works.
@@ -28,6 +35,7 @@
 #include "wux/fst.h"
 #include "wux/tmd.h"
 #include "wux/aes_cbc.h"
+#include "wux/ticket.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -298,6 +306,7 @@ struct TitleData {
     const FstEntry* dir = nullptr;   // the <titleid>/ dir in the SI FST
     std::string outDir;
     std::vector<U8> tik, tmdBytes, cert;
+    std::vector<U8> contentKey;      // NUS content key (ticket + common key)
     Tmd tmd;
     const TocPartition* gm = nullptr;
     U8 gmHeader[0x20];
@@ -313,7 +322,8 @@ struct TitleData {
 } // namespace
 
 Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
-                            const char* outRoot, ExtractResult& result,
+                            const char* commonKeyPath, const char* outRoot,
+                            ExtractResult& result,
                             ProgressFn progress, void* progressUser) {
     result = ExtractResult();
 
@@ -325,11 +335,23 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         return e;
     }
 
-    // 2. Load the 16-byte title key (16 raw bytes, or a 32-char hex string).
+    // 2. Load the 16-byte title/disc key (16 raw bytes, or a 32-char hex string).
     std::vector<U8> key;
     e = parseKeyFile(keyPath, key);
     if (e != Error::Ok) {
         result.error = std::string("read game.key: ") + errorName(e) +
+                       " (must be 16 raw bytes or a 32-char hex string)";
+        return e;
+    }
+
+    // 2b. Load the 16-byte console common key. Each GM title's NUS content key
+    //     is derived from its ticket plus this key; that content key decrypts
+    //     the GM FST (NUS content 0). The common key is console-specific and
+    //     user-supplied, never distributed or hardcoded.
+    std::vector<U8> commonKey;
+    e = parseKeyFile(commonKeyPath, commonKey);
+    if (e != Error::Ok) {
+        result.error = std::string("read common.key: ") + errorName(e) +
                        " (must be 16 raw bytes or a 32-char hex string)";
         return e;
     }
@@ -404,6 +426,20 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         e = getFstFile(siFst, container, si->offset, siBlockSize,
                        td.dir->path + "/title.tik", key.data(), td.tik);
         if (e != Error::Ok) { fail(e, "title.tik: " + std::string(errorName(e))); continue; }
+
+        // 6a2. Derive this title's NUS content key from the ticket + common key.
+        // The GM FST (NUS content 0) is encrypted with this key.
+        {
+            U8 ck[16];
+            e = deriveContentKey(commonKey.data(), td.tik.data(),
+                                 td.tik.size(), ck);
+            if (e != Error::Ok) {
+                fail(e, "content key: " + std::string(errorName(e)));
+                continue;
+            }
+            td.contentKey.assign(ck, ck + 16);
+        }
+
         e = getFstFile(siFst, container, si->offset, siBlockSize,
                        td.dir->path + "/title.tmd", key.data(), td.tmdBytes);
         if (e != Error::Ok) { fail(e, "title.tmd: " + std::string(errorName(e))); continue; }
@@ -450,8 +486,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         }
 
         // The GM FST is NUS content 0: its size is align16(TMD content 0), and
-        // it is a single continuous CBC stream. If the TMD has no content 0,
-        // fall back to the volume-header FSTSize.
+        // it is a single continuous CBC stream. It is encrypted with this
+        // title's CONTENT key (derived from the ticket + common key), not with
+        // the disc key. If the TMD has no content 0, fall back to the
+        // volume-header FSTSize.
         U64 gmFstSize = 0;
         for (size_t i = 0; i < td.tmd.contents.size(); ++i)
             if (td.tmd.contents[i].index == 0) {
@@ -462,7 +500,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         if (gmFstSize > 0) {
             std::vector<U8> gmFstBytes;
             e = readFstChained(container, fstOffset(td.gmHeader, gm->offset),
-                               (U32)gmFstSize, key.data(), gmFstBytes);
+                               (U32)gmFstSize, td.contentKey.data(), gmFstBytes);
             if (e != Error::Ok) { fail(e, "GM FST: " + std::string(errorName(e))); continue; }
             e = td.gmFst.parse(gmFstBytes.data(), gmFstBytes.size());
             if (e != Error::Ok) { fail(e, "GM FST parse: " + std::string(errorName(e))); continue; }

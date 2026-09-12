@@ -42,8 +42,15 @@ typedef void (*ProgressFn)(int cur, int total, U32 contentId, void* user);
 
 class WuxInstaller {
 public:
-    // Extract every title found in the .wux at wuxPath (title key at keyPath) into outRoot/<TITLEID>/
-    Error extract(const char* wuxPath, const char* keyPath, const char* outRoot,
+    // Extract every title found in the .wux at wuxPath into outRoot/<TITLEID>/.
+    //
+    // keyPath is the title/disc key (game.key); it decrypts the disc structure
+    // (TOC, data FST, TIK/TMD/CERT). commonKeyPath is the console common key
+    // (common.key); each GM title's NUS content key is derived from its ticket
+    // plus this key, and that content key decrypts the GM FST (NUS content 0).
+    // Both files live next to the .wux
+    Error extract(const char* wuxPath, const char* keyPath,
+                  const char* commonKeyPath, const char* outRoot,
                   ExtractResult& result,
                   ProgressFn progress = nullptr, void* progressUser = nullptr);
 };
