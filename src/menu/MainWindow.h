@@ -23,6 +23,7 @@
 #include "fs/CFolderList.hpp"
 #include "BrowserWindow.h"
 #include "InstallWindow.h"
+#include "WuxExtractThread.h"
 #include "ErrorViewer.h"
 #include "gui/GuiParticleImage.h"
 #include "gui/GuiButton.h"
@@ -145,6 +146,10 @@ private:
 	void OnWuxMessageBoxClick(GuiElement *element, int ok);
 	void RunWuxInstall();
 	void ShowWuxResult(const std::string &msg, bool ok);
+	void StartWuxExtraction(const std::string &wuxPath, const std::string &keyPath,
+	                          const std::string &commonKeyPath);
+	void OnWuxExtractFinished();
+	void OnWuxProgressBoxEffectFinished(GuiElement *element);
 	
 	int width, height;
     std::vector<GuiElement *> drcElements;
@@ -177,6 +182,19 @@ private:
     GuiTrigger wuxTrigger;
     GuiTrigger wuxTouchTrigger;
     GuiImage *wuxButtonImage;
+
+    // WUX flow state (extraction worker + progress window). wuxBusy guards
+    // against re-entry: the A/touch triggers fire from anywhere, so a second
+    // press mid-flow must not start a second extraction or installer.
+    // installWindowOpen covers the reverse direction too: while any
+    // InstallWindow is open (wux or browser flow), the other flow's entry
+    // point must not start a parallel install.
+    WuxExtractThread *wuxExtractThread;
+    MessageBox *wuxProgressBox;
+    bool wuxBusy;
+    bool installWindowOpen;
+    bool wuxBoxClosing;   // fade-out in flight for the progress box
+    std::vector<std::string> wuxCleanupFiles;   // .wux + game.key paths
 };
 
 #endif //_MAIN_WINDOW_H_

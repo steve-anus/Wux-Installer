@@ -62,12 +62,13 @@ Error readWhole(const char* path, std::vector<U8>& out) {
     int fd = ::open(path, O_RDONLY);
     if (fd < 0) return Error::IoError;
     out.clear();
-    U8 buf[0x10000];
+    // Heap buffer: this runs on the 192 KiB worker thread's stack (WuxExtractThread)
+    std::vector<U8> buf(0x10000);
     for (;;) {
-        ssize_t n = ::read(fd, buf, sizeof(buf));
+        ssize_t n = ::read(fd, buf.data(), buf.size());
         if (n < 0) { ::close(fd); return Error::IoError; }
         if (n == 0) break;
-        out.insert(out.end(), buf, buf + n);
+        out.insert(out.end(), buf.data(), buf.data() + n);
     }
     ::close(fd);
     return Error::Ok;
@@ -150,9 +151,23 @@ Error ensureDir(const char* path) {
     return ::stat(path, &st) == 0 ? Error::Ok : Error::IoError;
 }
 
-// Stream size bytes from the container into a file, one 32 KB sector at a time.
+// Progress state shared with the writer loop (see extract()). The callback
+// fires after every written 32 KB chunk so a GUI can show a live byte-level
+// bar. doneBytes is updated here and carries over between content files.
+struct WriteProgress {
+    ProgressFn fn = nullptr;   // null = no progress reporting
+    void* user = nullptr;
+    int cur = 0;               // current content index (1-based)
+    int total = 0;             // total content count
+    U32 contentId = 0;         // TMD content ID of the current file
+    U64 totalBytes = 0;        // total size of all .app files
+    U64 doneBytes = 0;         // bytes written so far
+};
+
+// Stream size bytes from the container into a file, one 32 KB sector at a
+// time. If wp is non-null, its callback fires per written chunk.
 Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
-                   const char* path) {
+                   const char* path, WriteProgress* wp) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return Error::IoError;
 
@@ -172,6 +187,11 @@ Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
             left -= (size_t)n;
         }
         done += chunk;
+        if (wp && wp->fn) {
+            wp->doneBytes += chunk;
+            wp->fn(wp->cur, wp->total, wp->contentId,
+                   wp->doneBytes, wp->totalBytes, wp->user);
+        }
     }
     ::close(fd);
     return Error::Ok;
@@ -535,9 +555,27 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
 
     // Pass 2: stream the content of every good title.
     int totalContents = 0;
-    for (size_t t = 0; t < titles.size(); ++t)
-        if (!titles[t].error) totalContents += (int)titles[t].tmd.contents.size();
+    U64 totalAppBytes = 0;
+    for (size_t t = 0; t < titles.size(); ++t) {
+        if (titles[t].error) continue;
+        totalContents += (int)titles[t].tmd.contents.size();
+        for (size_t i = 0; i < titles[t].tmd.contents.size(); ++i) {
+            // Same align16 rule as the .app size below.
+            U64 s = (titles[t].tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
+            if (s == 0) s = titles[t].tmd.contents[i].encryptedFileSize;
+            totalAppBytes += s;
+        }
+    }
     int doneContents = 0;
+
+    // Progress state for the writer loop: the callback fires per 32 KB chunk,
+    // doneBytes carries over between content files. The small metadata writes
+    // (.h3/.tmd/.tik/.cert) are not counted: the .app stream is the bulk.
+    WriteProgress wp;
+    wp.fn = progress;
+    wp.user = progressUser;
+    wp.total = totalContents;
+    wp.totalBytes = totalAppBytes;
 
     for (size_t t = 0; t < titles.size(); ++t) {
         TitleData& td = titles[t];
@@ -581,8 +619,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
 
             std::string id8 = hexUpper(c.id, 8);
+            wp.cur = doneContents + i + 1;
+            wp.contentId = c.id;
             e = streamToFile(container, contentOffset, appSize,
-                             (td.outDir + "/" + id8 + ".app").c_str());
+                             (td.outDir + "/" + id8 + ".app").c_str(), &wp);
             if (e != Error::Ok) {
                 td.error = true;
                 td.code = e;
@@ -606,7 +646,6 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 }
             }
 
-            if (progress) progress(doneContents + i + 1, totalContents, c.id, progressUser);
             doneContents++;
         }
         if (td.error) continue;

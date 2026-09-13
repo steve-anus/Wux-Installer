@@ -25,6 +25,7 @@
 #include <coreinit/mcp.h>
 #include <coreinit/memory.h>
 #include <coreinit/ios.h>
+#include <unistd.h>
 
 #define MCP_COMMAND_INSTALL_ASYNC   0x81
 #define MAX_INSTALL_PATH_LENGTH     0x27F
@@ -41,17 +42,32 @@ static void* IosInstallCallback(IOSError errorCode, void * priv_data)
 	return 0;
 }
 
-InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall)
+InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall,
+                             bool skipConfirm, bool askDelete,
+                             const std::vector<std::string> &cleanupFiles)
 	: GuiFrame(0, 0)
 	, CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff)
 	, folderList(list)
 	, deleteAfterInstall(deleteAfterInstall)
-{   
+	, askDelete(askDelete)
+	, deleteWuxFiles(false)
+	, cleanupFiles(cleanupFiles)
+{
 	mainWindow = Application::instance()->getMainWindow();
 	
 	folderCount = folderList->GetSelectedCount();
 	
-	if(folderCount > 0)
+	if(skipConfirm && folderCount > 0)
+	{
+		// WUX flow: the folders were selected by code, so skip the
+		// "are you sure" prompt and go straight to the destination question.
+		messageBox = new MessageBox(MessageBox::BT_DEST, MessageBox::IT_ICONQUESTION, false);
+		messageBox->setTitle("Where do you want to install?");
+		messageBox->setMessage1(fmt("%d application(s)", folderCount));
+		messageBox->messageYesClicked.connect(this, &InstallWindow::OnDestinationChoice);
+		messageBox->messageNoClicked.connect(this, &InstallWindow::OnDestinationChoice);
+	}
+	else if(folderCount > 0)
 	{
 		std::string message = fmt("%d application(s)", folderCount);
 		messageBox = new MessageBox(MessageBox::BT_YESNO, MessageBox::IT_ICONQUESTION, false);
@@ -72,6 +88,12 @@ InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall)
 	drcFrame->setEffect(EFFECT_FADE, 10, 255);
 	drcFrame->setState(GuiElement::STATE_DISABLED);
 	drcFrame->effectFinished.connect(this, &InstallWindow::OnOpenEffectFinish);
+	
+	// Opaque black background behind the box (appended first, so it draws
+	// under the MessageBox): the MessageBox's own dim layer is only 50%
+	// alpha, which let the main screen show through during the install.
+	blackBg = new GuiImage(1280, 720, (GX2Color){0, 0, 0, 255});
+	drcFrame->append(blackBg);
 	drcFrame->append(messageBox);
 	
 	mainWindow->append(drcFrame);
@@ -79,9 +101,11 @@ InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall)
 
 InstallWindow::~InstallWindow()
 {
+	drcFrame->remove(blackBg);
 	drcFrame->remove(messageBox);
 	mainWindow->remove(drcFrame);
 	delete drcFrame;
+	delete blackBg;
 	delete messageBox;
 }
 
@@ -103,6 +127,40 @@ void InstallWindow::OnDestinationChoice(GuiElement * element, int choice)
 	
 	messageBox->messageYesClicked.disconnect(this);
 	messageBox->messageNoClicked.disconnect(this);
+	
+	if(askDelete)
+	{
+		// WUX flow: ask whether the .wux image, game.key and the extracted
+		// .app folders are deleted from the SD card after a successful
+		// install. The deletion itself runs after the last title has
+		// installed (see InstallProcess).
+		std::string fileName = cleanupFiles.empty() ? std::string()
+			: cleanupFiles[0].substr(cleanupFiles[0].find_last_of('/') + 1);
+		messageBox->reload("Delete files after install?",
+			fmt("Delete %s, game.key and extracted files from the SD card after a successful install?",
+			    fileName.c_str()),
+			"", MessageBox::BT_YESNO, MessageBox::IT_ICONQUESTION);
+		messageBox->messageYesClicked.connect(this, &InstallWindow::OnDeleteChoice);
+		messageBox->messageNoClicked.connect(this, &InstallWindow::OnDeleteChoice);
+		return;
+	}
+	
+	startInstalling();
+}
+
+void InstallWindow::OnDeleteChoice(GuiElement * element, int choice)
+{
+	messageBox->messageYesClicked.disconnect(this);
+	messageBox->messageNoClicked.disconnect(this);
+	
+	// Yes: delete the install folders after each title (deleteAfterInstall)
+	// and the .wux image + game.key after the last title (deleteWuxFiles).
+	// No: keep everything on the SD card.
+	if(choice == MessageBox::MR_YES)
+	{
+		deleteAfterInstall = true;
+		deleteWuxFiles = true;
+	}
 	
 	startInstalling();
 }
@@ -349,6 +407,18 @@ void InstallWindow::InstallProcess(int pos, int total)
 				stopAt = SD_WUDUMP_PATH;
 
 			RemoveDirectoryAndEmptyParents(path.c_str(), stopAt);
+			
+			// The .wux image and game.key (in /wudump) are deleted only
+			// after the LAST title has installed, so a failure on a later
+			// title leaves them in place for a retry. unlink uses the same
+			// POSIX I/O layer the wux module uses for the SD card; the
+			// return value is ignored on purpose (missing file = already
+			// gone, which is the desired end state).
+			if(deleteWuxFiles && pos == total)
+			{
+				for(size_t i = 0; i < cleanupFiles.size(); ++i)
+					unlink(cleanupFiles[i].c_str());
+			}
 		}
 
 		if(pos == total)

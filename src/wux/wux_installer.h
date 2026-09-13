@@ -36,9 +36,12 @@ struct ExtractResult {
     int titleCount = 0;
 };
 
-// Progress callback, called once per content file before it is written:
-// (currentIndex 1-based, total, contentId, user). May be null.
-typedef void (*ProgressFn)(int cur, int total, U32 contentId, void* user);
+// Progress callback, called for every 32 KB chunk written to a .app file,
+// so a GUI can show a live byte-level bar during the extraction:
+// (currentIndex 1-based, total, contentId, bytes written so far, total
+// bytes of all .app files, user). May be null.
+typedef void (*ProgressFn)(int cur, int total, U32 contentId,
+                           U64 doneBytes, U64 totalBytes, void* user);
 
 class WuxInstaller {
 public:

@@ -13,8 +13,8 @@ TOPDIR ?= $(CURDIR)
 # APP_SHORTNAME sets the short name of the application
 # APP_AUTHOR sets the author of the application
 #-------------------------------------------------------------------------------
-APP_NAME		:= WUX Installer
-APP_SHORTNAME	:= WUX Installer
+APP_NAME		:= Wux Installer
+APP_SHORTNAME	:= Wux Installer
 APP_AUTHOR		:= steve-anus
 
 include $(DEVKITPRO)/wut/share/wut_rules
