@@ -26,6 +26,12 @@ void log_print(const char *str)
 
 void log_printf(const char *format, ...)
 {
-    WHBLogPrintf(format);
+    // Format first, then print: WHBLogPrintf would lose the variadic args.
+    char buf[512];
+    va_list ap;
+    va_start(ap, format);
+    vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+    WHBLogPrint(buf);
 }
 #endif

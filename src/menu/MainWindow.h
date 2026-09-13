@@ -139,6 +139,7 @@ private:
 	void OnInstallButtonClicked(GuiElement *element);
 	void OnBrowserCloseEffectFinish(GuiElement *element);
 	void OnInstallWindowClosed(GuiElement *element);
+	void OnWuxInstallWindowClosed(GuiElement *element);
 	void OnErrorMessageBoxClick(GuiElement *element, int ok);
 	void OnOpenEffectFinish(GuiElement *element);
 	void OnCloseEffectFinish(GuiElement *element);

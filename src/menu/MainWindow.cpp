@@ -41,6 +41,7 @@ MainWindow::MainWindow(int w, int h)
 	wuxExtractThread = NULL;
 	wuxProgressBox = NULL;
 	wuxBusy = false;
+	installWindowOpen = false;
 	wuxBoxClosing = false;
 	wuxButton = NULL;
 	wuxLabel = NULL;
@@ -323,17 +324,36 @@ void MainWindow::OnBrowserCloseEffectFinish(GuiElement *element)
 }
 void MainWindow::OnInstallWindowClosed(GuiElement *element)
 {
-	// An install window closed (wux or browser flow): both entry points may
-	// start a new flow again. Harmless for the browser flow, where home was
-	// already re-enabled at the end of the install thread.
+	// The BROWSER flow's install window closed (the wux flow uses its own
+	// close handler, OnWuxInstallWindowClosed): a new flow may start again.
+	// Re-enabling home is harmless - the install thread already did it.
 	wuxBusy = false;
 	installWindowOpen = false;
+	installWindow = NULL;
 	OSEnableHomeButtonMenu(TRUE);
 	Application::instance()->exitEnable();
 	
 	if(folderList)
 		folderList->Get();
 	SetBrowserWindow();
+	currentDrcFrame->bringToFront(&headerFrame);
+}
+
+void MainWindow::OnWuxInstallWindowClosed(GuiElement *element)
+{
+	// The wux flow's install window closed: return to the plain main screen
+	// (header + "install wux" button) and do NOT recreate the WUP folder
+	// browser, which the flow removed when the install started. The browser
+	// flow keeps its own close handler (OnInstallWindowClosed), which does
+	// recreate the browser.
+	wuxBusy = false;
+	installWindowOpen = false;
+	installWindow = NULL;
+	OSEnableHomeButtonMenu(TRUE);
+	Application::instance()->exitEnable();
+	
+	if(folderList)
+		folderList->Get();
 	currentDrcFrame->bringToFront(&headerFrame);
 }
 
@@ -489,7 +509,9 @@ void MainWindow::OnWuxExtractFinished()
 		}
 		installWindowOpen = true;
 		installWindow = new InstallWindow(folderList, false, true, true, wuxCleanupFiles);
-		installWindow->installWindowClosed.connect(this, &MainWindow::OnInstallWindowClosed);
+		// The wux flow ends back on the plain main screen (no WUP browser),
+		// unlike the browser flow, so it gets its own close handler.
+		installWindow->installWindowClosed.connect(this, &MainWindow::OnWuxInstallWindowClosed);
 	}
 	else
 	{

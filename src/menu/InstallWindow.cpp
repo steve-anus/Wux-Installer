@@ -18,6 +18,7 @@
 #include "Application.h"
 #include "InstallWindow.h"
 #include "utils/StringTools.h"
+#include "utils/logger.h"
 #include "common/common.h"
 #include "common/fs_defs.h"
 #include "system/power.h"
@@ -25,6 +26,7 @@
 #include <coreinit/mcp.h>
 #include <coreinit/memory.h>
 #include <coreinit/ios.h>
+#include <coreinit/filesystem.h>
 #include <unistd.h>
 
 #define MCP_COMMAND_INSTALL_ASYNC   0x81
@@ -40,6 +42,37 @@ static void* IosInstallCallback(IOSError errorCode, void * priv_data)
 	installError = errorCode;
 	installCompleted = 1;
 	return 0;
+}
+
+// The POSIX layer on the Wii U (wut's newlib glue) removes files through the
+// legacy coreinit FSARemove API, which can fail on files that were not
+// created through that layer (e.g. the .wux image and game.key, which the
+// user put on the SD card). This removes the file through the modern coreinit
+// FS client instead. Only the client is added/removed here - no FSInit/
+// FSShutdown: the FS module stays up for the whole session, and ErrorViewer
+// keeps its own client registered for the app's entire lifetime.
+static bool deleteViaFsClient(const std::string &fsPath)
+{
+	// newlib path "fs:/vol/external01/..." -> coreinit FS path "sd:/...".
+	char path[MAX_INSTALL_PATH_LENGTH];
+	if (fsPath.compare(0, 3, "fs:") == 0)
+		snprintf(path, sizeof(path), "sd:%s", fsPath.c_str() + 3);
+	else
+		snprintf(path, sizeof(path), "%s", fsPath.c_str());
+	
+	FSClient client;
+	if (FSAddClient(&client, FS_ERROR_FLAG_NONE) != FS_STATUS_OK)
+		return false;
+	
+	FSCmdBlock block;
+	FSInitCmdBlock(&block);
+	FSStatus st = FSRemove(&client, &block, path, FS_ERROR_FLAG_NONE);
+	
+	if (FSDelClient(&client, FS_ERROR_FLAG_NONE) != FS_STATUS_OK)
+		log_printf("InstallWindow: FSDelClient failed after FSRemove");
+	
+	// FS_STATUS_NOT_FOUND = already gone, which is the desired end state.
+	return st == FS_STATUS_OK || st == FS_STATUS_NOT_FOUND;
 }
 
 InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall,
@@ -397,6 +430,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 	
 	if(result >= 0)
 	{
+		bool wuxDeleteFailed = false;
 		if(deleteAfterInstall)
 		{
 			std::string path = folderList->GetPath(index);
@@ -410,20 +444,26 @@ void InstallWindow::InstallProcess(int pos, int total)
 			
 			// The .wux image and game.key (in /wudump) are deleted only
 			// after the LAST title has installed, so a failure on a later
-			// title leaves them in place for a retry. unlink uses the same
-			// POSIX I/O layer the wux module uses for the SD card; the
-			// return value is ignored on purpose (missing file = already
-			// gone, which is the desired end state).
+			// title leaves them in place for a retry. A failed POSIX unlink
+			// falls back to the coreinit FS client (see deleteViaFsClient).
 			if(deleteWuxFiles && pos == total)
 			{
 				for(size_t i = 0; i < cleanupFiles.size(); ++i)
-					unlink(cleanupFiles[i].c_str());
+				{
+					if (unlink(cleanupFiles[i].c_str()) != 0 &&
+					    !deleteViaFsClient(cleanupFiles[i]))
+						wuxDeleteFailed = true;
+				}
 			}
 		}
 
 		if(pos == total)
 		{
-			messageBox->reload("Successfully installed", gameName, "", MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
+			// Tell the user if the optional cleanup could not be completed.
+			std::string note = wuxDeleteFailed
+				? "Could not delete the .wux / game.key from the SD card, remove them manually."
+				: "";
+			messageBox->reload("Successfully installed", gameName, note, MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
 			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
 		}
 		else

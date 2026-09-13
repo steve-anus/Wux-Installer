@@ -619,7 +619,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
 
             std::string id8 = hexUpper(c.id, 8);
-            wp.cur = doneContents + i + 1;
+            // doneContents already counts the earlier files of this title
+            // (it is incremented after every write), so the file being
+            // written now is simply the (done + 1)th file overall.
+            wp.cur = doneContents + 1;
             wp.contentId = c.id;
             e = streamToFile(container, contentOffset, appSize,
                              (td.outDir + "/" + id8 + ".app").c_str(), &wp);
