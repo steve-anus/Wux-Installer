@@ -151,22 +151,33 @@ static inline bool CheckMP3Signature(const u8 * buffer)
 
 SoundDecoder * SoundHandler::GetSoundDecoder(const char * filepath)
 {
-	u32 magic;
+	u32 magic = 0;
 	CFile f(filepath, CFile::ReadOnly);
 	if(f.size() == 0)
 		return NULL;
 
-	do
-	{
-		f.read((u8 *) &magic, 1);
-	}
-	while(((u8 *) &magic)[0] == 0 && f.tell() < f.size());
+	//! one bounded window instead of walking leading padding byte by byte
+	u8 window[64];
+	memset(window, 0, sizeof(window));
 
-	if(f.tell() == f.size())
+	int ret = f.read(window, sizeof(window));
+	if(ret <= 0)
 		return NULL;
 
-	f.seek(f.tell()-1, SEEK_SET);
-	f.read((u8 *) &magic, 4);
+	u32 done = (u32) ret;
+	u32 offset = 0;
+	while(offset < done && window[offset] == 0)
+		offset++;
+
+	//! nothing but padding inside the window
+	if(offset == done)
+		return NULL;
+
+	u32 avail = done - offset;
+
+	if(avail >= sizeof(u32))
+		memcpy(&magic, &window[offset], sizeof(u32));
+
 	f.close();
 
 	if(magic == 0x4f676753) // 'OggS'
@@ -177,7 +188,7 @@ SoundDecoder * SoundHandler::GetSoundDecoder(const char * filepath)
 	{
 		return new WavDecoder(filepath);
 	}
-	else if(CheckMP3Signature((u8 *) &magic) == true)
+	else if(avail >= 3 && CheckMP3Signature(&window[offset]) == true)
 	{
 		return new Mp3Decoder(filepath);
 	}
@@ -187,10 +198,14 @@ SoundDecoder * SoundHandler::GetSoundDecoder(const char * filepath)
 
 SoundDecoder * SoundHandler::GetSoundDecoder(const u8 * sound, int length)
 {
+	//! enough bytes to inspect any of the known magics
+	if(!sound || length < 8)
+		return NULL;
+
 	const u8 * check = sound;
 	int counter = 0;
 
-	while(check[0] == 0 && counter < length)
+	while(counter < length && check[0] == 0)
 	{
 		check++;
 		counter++;
@@ -199,13 +214,19 @@ SoundDecoder * SoundHandler::GetSoundDecoder(const u8 * sound, int length)
 	if(counter >= length)
 		return NULL;
 
-	u32 * magic = (u32 *) check;
+	//! keep enough bytes around to read the widest magic
+	if(length - counter < 8)
+		return NULL;
 
-	if(magic[0] == 0x4f676753) // 'OggS'
+	//! the buffer can be unaligned, memcpy keeps the read alignment safe
+	u32 magic = 0;
+	memcpy(&magic, check, sizeof(u32));
+
+	if(magic == 0x4f676753) // 'OggS'
 	{
 	    return new OggDecoder(sound, length);
 	}
-	else if(magic[0] == 0x52494646) // 'RIFF'
+	else if(magic == 0x52494646) // 'RIFF'
 	{
 		return new WavDecoder(sound, length);
 	}
@@ -249,30 +270,30 @@ void SoundHandler::executeThread()
 
 		for(i = 0; i < MAX_DECODERS; ++i)
 		{
-			if(DecoderList[i] == NULL)
+			//! single snapshot so lock/decode/unlock always pair up on the same object
+			SoundDecoder *d = DecoderList[i];
+			if(!d)
 				continue;
 
 			Decoding = true;
-			if(DecoderList[i])
-                DecoderList[i]->Lock();
-			if(DecoderList[i])
-                DecoderList[i]->Decode();
-			if(DecoderList[i])
-                DecoderList[i]->Unlock();
+			d->Lock();
+			d->Decode();
+			d->Unlock();
 		}
 		Decoding = false;
 	}
 
-	for(u32 i = 0; i < MAX_DECODERS; ++i)
-        voiceList[i]->stop();
+	for(u32 j = 0; j < MAX_DECODERS; ++j)
+        if(voiceList[j])
+            voiceList[j]->stop();
 
     AXRegisterAppFrameCallback(NULL);
     AXQuit();
 
-    for(u32 i = 0; i < MAX_DECODERS; ++i)
+    for(u32 j = 0; j < MAX_DECODERS; ++j)
     {
-        delete voiceList[i];
-        voiceList[i] = NULL;
+        delete voiceList[j];
+        voiceList[j] = NULL;
     }
 }
 
@@ -281,6 +302,9 @@ void SoundHandler::axFrameCallback(void)
     for (u32 i = 0; i < MAX_DECODERS; i++)
     {
         Voice *voice = handlerInstance->getVoice(i);
+        //! slots are only filled when a sound grabs a voice
+        if(!voice)
+            continue;
 
         switch (voice->getState())
         {
@@ -290,6 +314,12 @@ void SoundHandler::axFrameCallback(void)
 
             case Voice::STATE_START: {
                 SoundDecoder * decoder = handlerInstance->getDecoder(i);
+                if(!decoder)
+                {
+                    voice->setState(Voice::STATE_STOPPED);
+                    break;
+                }
+
                 decoder->Lock();
                 if(decoder->IsBufferReady())
                 {
@@ -322,6 +352,12 @@ void SoundHandler::axFrameCallback(void)
                     if(voice->isBufferSwitched())
                     {
                         SoundDecoder * decoder = handlerInstance->getDecoder(i);
+                        if(!decoder)
+                        {
+                            voice->setState(Voice::STATE_STOPPED);
+                            break;
+                        }
+
                         decoder->Lock();
                         if(decoder->IsBufferReady())
                         {

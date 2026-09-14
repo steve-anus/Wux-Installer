@@ -312,8 +312,8 @@ void BrowserWindow::OnDPADClick(GuiButton *button, const GuiController *controll
 			
 			if (index >= 0)
 				folderButtons[index].folderButton->clearState(STATE_SELECTED);
-			index = 0;
-			folderButtons[index].folderButton->setState(STATE_SELECTED);
+			if (!folderButtons.empty())
+				folderButtons[0].folderButton->setState(STATE_SELECTED);
 
 			pageIndex = 0;
 			selectedItem = 0;

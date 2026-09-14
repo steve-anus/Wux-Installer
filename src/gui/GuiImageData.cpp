@@ -190,7 +190,8 @@ void GuiImageData::gdImageToUnormR8G8B8A8(gdImagePtr gdImg, u32 *imgBuffer, u32 
     }
 }
 
-//! TODO: figure out why this seems to not work correct yet
+//! Legacy R5G6B5 conversion: every loader in this app takes the RGBA8
+//! default, so this path has no live caller; kept for API completeness.
 void GuiImageData::gdImageToUnormR5G6B5(gdImagePtr gdImg, u16 *imgBuffer, u32 width, u32 height, u32 pitch)
 {
     for(u32 y = 0; y < height; ++y)

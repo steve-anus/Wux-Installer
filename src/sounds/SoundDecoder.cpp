@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <coreinit/cache.h>
+#include "utils/logger.h"
 #include "SoundDecoder.hpp"
 
 static const u32 FixedPointShift = 15;
@@ -44,8 +45,15 @@ SoundDecoder::SoundDecoder(const u8 * buffer, int size)
 SoundDecoder::~SoundDecoder()
 {
 	ExitRequested = true;
-	while(Decoding)
+	//! capped handoff so teardown cannot hang on a stuck decode loop
+	int waitCount = 0;
+	while(Decoding && waitCount < 2000)
+	{
 		usleep(1000);
+		waitCount++;
+	}
+	if(Decoding)
+		log_printf("SoundDecoder: timed out waiting for decode to finish\n");
 
 	//! lock unlock once to make sure it's really not decoding
 	Lock();
@@ -64,6 +72,8 @@ void SoundDecoder::Init()
 	SoundType = SOUND_RAW;
 	SoundBlocks = 8;
 	SoundBlockSize = 0x4000;
+	Format = (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT);
+	SampleRate = 48000;
 	ResampleTo48kHz = false;
 	CurPos = 0;
 	whichLoad = 0;
@@ -79,6 +89,9 @@ void SoundDecoder::Init()
 
 int SoundDecoder::Rewind()
 {
+	if(!file_fd)
+		return -1;
+
 	CurPos = 0;
 	EndOfFile = false;
 	file_fd->rewind();
@@ -101,8 +114,12 @@ void SoundDecoder::EnableUpsample(void)
 	   && SampleRate != 32000
 	   && SampleRate != 48000)
 	{
-		ResampleBuffer = (u8*)memalign(32, SoundBlockSize);
 		ResampleRatio =  ( FixedPointScale * SampleRate ) / 48000;
+		//! a ratio of 1.0 or more is not an upsample and breaks the step below
+		if(ResampleRatio >= FixedPointScale)
+			return;
+
+		ResampleBuffer = (u8*)memalign(32, SoundBlockSize);
 		SoundBlockSize = ( SoundBlockSize * ResampleRatio ) / FixedPointScale;
 		SoundBlockSize &= ~0x03;
 		// set new sample rate
@@ -122,8 +139,10 @@ void SoundDecoder::Upsample(s16 *src, s16 *dst, u32 nr_src_samples, u32 nr_dst_s
 			dst[i+1] = src[n+1] + ( ((src[n+3] - src[n+1]) * timer) >> FixedPointShift );
 		}
 		else {
-			dst[i]   = src[n];
-			dst[i+1] = src[n+1];
+			//! never read past the last source sample, repeat it instead
+			dst[i]   = (n < nr_src_samples) ? src[n] : 0;
+			dst[i+1] = (n+1 < nr_src_samples) ? src[n+1] :
+			                    (nr_src_samples > 0 ? src[nr_src_samples-1] : 0);
 		}
 
 		timer += ResampleRatio;
@@ -152,6 +171,7 @@ void SoundDecoder::Decode()
 	Decoding = true;
 
 	int done  = 0;
+	int eofRetries = 0;
 	u8 * write_buf = SoundBuffer.GetBuffer(whichLoad);
 	if(!write_buf)
 	{
@@ -169,18 +189,27 @@ void SoundDecoder::Decode()
 
 		if(ret <= 0)
 		{
-			if(Loop)
-			{
-				Rewind();
-				continue;
-			}
-			else
+			eofRetries++;
+
+			//! repeated end of data means the source cannot advance anymore
+			if(eofRetries >= 3 || ExitRequested)
 			{
 				EndOfFile = true;
 				break;
 			}
+
+			if(Loop)
+			{
+				Rewind();
+				usleep(1000);
+				continue;
+			}
+
+			EndOfFile = true;
+			break;
 		}
 
+		eofRetries = 0;
 		done += ret;
 	}
 

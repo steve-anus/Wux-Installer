@@ -30,6 +30,8 @@
 #include <malloc.h>
 #include <math.h>
 #include "common/types.h"
+#include "utils/utils.h"
+#include "utils/logger.h"
 #include "Mp3Decoder.hpp"
 
 Mp3Decoder::Mp3Decoder(const char * filepath)
@@ -67,8 +69,15 @@ Mp3Decoder::Mp3Decoder(const u8 * snd, int len)
 Mp3Decoder::~Mp3Decoder()
 {
 	ExitRequested = true;
-	while(Decoding)
+	//! capped handoff so teardown cannot hang on a stuck decode loop
+	int waitCount = 0;
+	while(Decoding && waitCount < 2000)
+	{
 		usleep(100);
+		waitCount++;
+	}
+	if(Decoding)
+		log_printf("Mp3Decoder: timed out waiting for decode to finish\n");
 
 	mad_synth_finish(&Synth);
 	mad_frame_finish(&Frame);
@@ -82,7 +91,8 @@ Mp3Decoder::~Mp3Decoder()
 void Mp3Decoder::OpenFile()
 {
 	GuardPtr = NULL;
-	ReadBuffer = (u8 *) memalign(32, SoundBlockSize*SoundBlocks);
+	//! libmad reads MAD_BUFFER_GUARD bytes of zero padding past the stream data
+	ReadBuffer = (u8 *) memalign(32, ALIGN32(SoundBlockSize*SoundBlocks) + MAD_BUFFER_GUARD);
 	if(!ReadBuffer)
 	{
 		if(file_fd)
@@ -102,7 +112,7 @@ void Mp3Decoder::OpenFile()
 	}
 
 	SampleRate = (u32) Frame.header.samplerate;
-	Format = ((MAD_NCHANNELS(&Frame.header) == 2) ? (FORMAT_PCM_16_BIT | CHANNELS_STEREO) : (FORMAT_PCM_16_BIT | CHANNELS_MONO));
+	Format = ((MAD_NCHANNELS(&Frame.header) == 2) ? (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT) : (u16)((u16)CHANNELS_MONO | (u16)FORMAT_PCM_16_BIT));
 	Rewind();
 }
 
@@ -141,10 +151,9 @@ int Mp3Decoder::Read(u8 * buffer, int buffer_size, int pos)
 	if(!file_fd)
 		return -1;
 
-	if(Format == (FORMAT_PCM_16_BIT | CHANNELS_STEREO))
-		buffer_size &= ~0x0003;
-	else
-		buffer_size &= ~0x0001;
+	//! the frame channel count can differ from the cached format, so keep the
+	//! sample alignment at 16 bit and bound every store below instead
+	buffer_size &= ~0x0001;
 
 	u8 * write_pos = buffer;
 	u8 * write_end = buffer+buffer_size;
@@ -153,7 +162,7 @@ int Mp3Decoder::Read(u8 * buffer, int buffer_size, int pos)
 	{
 		while(SynthPos < Synth.pcm.length)
 		{
-			if(write_pos >= write_end)
+			if(write_pos + 2 > write_end)
 				return write_pos-buffer;
 
 			*((s16 *) write_pos) = FixedToShort(Synth.pcm.samples[0][SynthPos]);
@@ -161,6 +170,9 @@ int Mp3Decoder::Read(u8 * buffer, int buffer_size, int pos)
 
 			if(MAD_NCHANNELS(&Frame.header) == 2)
 			{
+				if(write_pos + 2 > write_end)
+					return write_pos-buffer;
+
 				*((s16 *) write_pos) = FixedToShort(Synth.pcm.samples[1][SynthPos]);
 				write_pos += 2;
 			}
@@ -184,29 +196,52 @@ int Mp3Decoder::Read(u8 * buffer, int buffer_size, int pos)
 			ReadSize = file_fd->read(ReadStart, ReadSize);
 			if(ReadSize <= 0)
 			{
+				//! second EOF pass: the padding already in place yielded no
+				//! new frame, so the stream is done - end it, don't spin
+				if(GuardPtr)
+					return -1;
+
 				GuardPtr = ReadStart;
 				memset(GuardPtr, 0, MAD_BUFFER_GUARD);
 				ReadSize = MAD_BUFFER_GUARD;
+				//! keep stream data plus its guard inside the allocation
+				if(Remaining + ReadSize > SoundBlockSize*SoundBlocks)
+					ReadSize = SoundBlockSize*SoundBlocks - Remaining;
 			}
 
 			CurPos += ReadSize;
 			mad_stream_buffer(&Stream, ReadBuffer, Remaining+ReadSize);
+			//! libmad may read MAD_BUFFER_GUARD bytes past the stream data
+			memset(ReadBuffer + Remaining + ReadSize, 0, MAD_BUFFER_GUARD);
 		}
 
 		if(mad_frame_decode(&Frame,&Stream))
 		{
 			if(MAD_RECOVERABLE(Stream.error))
 			{
-			  if(Stream.error != MAD_ERROR_LOSTSYNC || !GuardPtr)
+				/*
+				 * a lost sync inside the end of data padding cannot be
+				 * recovered by refilling the buffer
+				 */
+				if(Stream.error == MAD_ERROR_LOSTSYNC && GuardPtr)
+					return -1;
+
+				Stream.error = MAD_ERROR_NONE;
 				continue;
 			}
-			else
-			{
-				if(Stream.error != MAD_ERROR_BUFLEN)
-					return -1;
-				else if(Stream.error == MAD_ERROR_BUFLEN && GuardPtr)
-					return -1;
-			}
+
+			if(Stream.error != MAD_ERROR_BUFLEN)
+				return -1;
+
+			/*
+			 * MAD_ERROR_BUFLEN needs more input, every other error is fatal.
+			 * mad_synth_frame() must never run on a frame that failed to
+			 * decode, its header and samples are only valid after success.
+			 */
+			if(GuardPtr)
+				return -1;
+
+			continue;
 		}
 
 		mad_timer_add(&Timer,Frame.header.duration);

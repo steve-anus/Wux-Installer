@@ -72,6 +72,9 @@ public:
             return;
 
         //! this must be moved into an area where the graphic engine has access to and must be aligned to 0x100
+        if(pixelShader->program)
+            free(pixelShader->program);
+
         pixelShader->size = programSize;
         pixelShader->program = (u8*)memalign(GX2_SHADER_ALIGNMENT, pixelShader->size);
         if(pixelShader->program)
@@ -80,7 +83,9 @@ public:
             GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, pixelShader->program, pixelShader->size);
         }
 
-        memcpy(&pixelShader->regs, regs, regsSize);
+        //! never copy past the register block, whatever the caller measured
+        u32 copySize = (regsSize > sizeof(pixelShader->regs)) ? (u32) sizeof(pixelShader->regs) : regsSize;
+        memcpy(&pixelShader->regs, regs, copySize);
     }
 
     void addUniformVar(const GX2UniformVar & var)
@@ -140,8 +145,15 @@ public:
         GX2SetPixelShader(pixelShader);
     }
 
-    static inline void setUniformReg(u32 location, u32 size, const void * reg) {
-        GX2SetPixelUniformReg(location, size, (uint32_t *)reg);
+    //! One 16-byte constant slot is the smallest legal upload; see the matching
+    //! helper in VertexShader.h for why the count is fixed and the alignment of
+    //! the slot is checked.
+    static inline void setUniform4(u32 location, const void * reg) {
+        if((location & 3) != 0) {
+            log_printf("PixelShader::setUniform4: uniform slot %u is not 16-byte aligned\n", location);
+            return;
+        }
+        GX2SetPixelUniformReg(location, 4, reg);
     }
 protected:
     GX2PixelShader *pixelShader;

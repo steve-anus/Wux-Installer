@@ -30,13 +30,8 @@
 #include <string>
 #include "common/types.h"
 
-const char * fmt(const char * format, ...);
-const wchar_t * wfmt(const char * format, ...);
-int strprintf(std::string &str, const char * format, ...);
-std::string strfmt(const char * format, ...);
-bool char2wchar_t(const char * src, wchar_t * dest);
 int strtokcmp(const char * string, const char * compare, const char * separator);
-int strextcmp(const char * string, const char * extension, char seperator);
+std::string strfmt(const char * format, ...) __attribute__((format(printf, 1, 2)));
 
 inline const char * FullpathToFilename(const char *path)
 {
@@ -71,8 +66,6 @@ inline void RemoveDoubleSlashs(std::string &str)
 		}
 	}
 }
-
-std::vector<std::string> stringSplit(const std::string & value, const std::string & splitter);
 
 #endif /* __STRING_TOOLS_H */
 

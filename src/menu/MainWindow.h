@@ -18,18 +18,25 @@
 #define _MAIN_WINDOW_H_
 
 #include <vector>
-#include <queue>
-#include "gui/Gui.h"
-#include "fs/CFolderList.hpp"
-#include "BrowserWindow.h"
-#include "InstallWindow.h"
-#include "WuxExtractThread.h"
-#include "ErrorViewer.h"
-#include "gui/GuiParticleImage.h"
-#include "gui/GuiButton.h"
-#include "system/CMutex.h"
 
+#include "gui/GuiFrame.h"
+#include "gui/GuiImage.h"
+#include "gui/GuiText.h"
+#include "gui/GuiTrigger.h"
+#include "system/CMutex.h"
+#include "WuxFlow.h"
+
+// Only the types used by name below are included; everything reachable
+// through a pointer or a reference is forward declared so that adding a
+// window class here does not pull its whole dependency chain into every
+// file that includes this header.
 class CVideo;
+class CFolderList;
+class BrowserWindow;
+class ErrorViewer;
+class GuiButton;
+class GuiController;
+class GuiImageData;
 
 class MainWindow : public sigslot::has_slots<>
 {
@@ -60,29 +67,6 @@ public:
         appendDrc(e);
     }
 
-    void insertTv(u32 pos, GuiElement *e)
-    {
-        if(!e)
-            return;
-
-        removeTv(e);
-        tvElements.insert(tvElements.begin() + pos, e);
-    }
-    void insertDrc(u32 pos, GuiElement *e)
-    {
-        if(!e)
-            return;
-
-        removeDrc(e);
-        drcElements.insert(drcElements.begin() + pos, e);
-    }
-
-    void insert(u32 pos, GuiElement *e)
-    {
-        insertTv(pos, e);
-        insertDrc(pos, e);
-    }
-
     void removeTv(GuiElement *e)
     {
         for(u32 i = 0; i < tvElements.size(); ++i)
@@ -111,11 +95,6 @@ public:
         removeTv(e);
         removeDrc(e);
     }
-    void removeAll()
-    {
-        tvElements.clear();
-        drcElements.clear();
-    }
 
     void drawDrc(CVideo *video);
     void drawTv(CVideo *video);
@@ -135,14 +114,22 @@ private:
     void SetupMainView(void);
 	void SetDrcHeader(void);
 	void SetBrowserWindow(void);
+
+	//! Takes the folder browser out of the draw tree and queues it for
+	//! deletion. Single owner of that transition: the paths that used to
+	//! null the member directly left the object alive in the tree, and the
+	//! ones that deleted it by hand duplicated the removal steps.
+	void CloseBrowser(void);
 	
 	void OnInstallButtonClicked(GuiElement *element);
 	void OnBrowserCloseEffectFinish(GuiElement *element);
 	void OnInstallWindowClosed(GuiElement *element);
 	void OnWuxInstallWindowClosed(GuiElement *element);
-	void OnErrorMessageBoxClick(GuiElement *element, int ok);
+	//! Shared tail of the two install-window close handlers: releases the
+	//! flow and restores the home button. The browser flow rebuilds the
+	//! folder browser, the wux flow returns to the plain start screen.
+	void FinishInstallFlow(bool rebuildBrowser);
 	void OnOpenEffectFinish(GuiElement *element);
-	void OnCloseEffectFinish(GuiElement *element);
 	void OnWuxInstallClicked(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 	void OnWuxMessageBoxClick(GuiElement *element, int ok);
 	void RunWuxInstall();
@@ -156,9 +143,6 @@ private:
     std::vector<GuiElement *> drcElements;
     std::vector<GuiElement *> tvElements;
 
-	GuiImageData *splashImgData;
-    GuiImage splashImg;
-	
 	GuiImageData *titleImgData;
     GuiImage titleImg;
 	GuiText titleText;
@@ -173,7 +157,6 @@ private:
 	
 	CFolderList * folderList;
     BrowserWindow * browserWindow;
-	InstallWindow * installWindow;
     ErrorViewer * errorViewer;
 
     CMutex guiMutex;
@@ -184,18 +167,10 @@ private:
     GuiTrigger wuxTouchTrigger;
     GuiImage *wuxButtonImage;
 
-    // WUX flow state (extraction worker + progress window). wuxBusy guards
-    // against re-entry: the A/touch triggers fire from anywhere, so a second
-    // press mid-flow must not start a second extraction or installer.
-    // installWindowOpen covers the reverse direction too: while any
-    // InstallWindow is open (wux or browser flow), the other flow's entry
-    // point must not start a parallel install.
-    WuxExtractThread *wuxExtractThread;
-    MessageBox *wuxProgressBox;
-    bool wuxBusy;
-    bool installWindowOpen;
-    bool wuxBoxClosing;   // fade-out in flight for the progress box
-    std::vector<std::string> wuxCleanupFiles;   // .wux + game.key paths
+    //! Whole install flow: one State value plus the flow's resources, where
+    //! the re-entrancy guards used to be three independent booleans. Owned
+    //! by the GUI thread; see the state table in WuxFlow.h.
+    WuxFlow wux;
 };
 
 #endif //_MAIN_WINDOW_H_

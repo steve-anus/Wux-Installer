@@ -69,6 +69,11 @@ int CFile::open(const u8 * mem, int size)
 {
 	this->close();
 
+	//! A memory "file" must have bytes to read; anything else is a caller
+	//! bug or corrupt resource metadata.
+	if(mem == NULL || size <= 0)
+		return -1;
+
 	mem_file = mem;
 	filesize = size;
 
@@ -98,8 +103,14 @@ int CFile::read(u8 * ptr, size_t size)
 
 	int readsize = size;
 
-	if(readsize > (s64) (filesize-pos))
-		readsize = filesize-pos;
+	//! Clamp in signed arithmetic: a u64 (filesize-pos) wraps to a huge
+	//! value when pos has been seeked past the end.
+	s64 remain = (s64)filesize - (s64)pos;
+	if(remain < 0)
+		remain = 0;
+
+	if((s64)readsize > remain)
+		readsize = (int)remain;
 
 	if(readsize <= 0)
 		return readsize;
@@ -174,24 +185,3 @@ int CFile::seek(long int offset, int origin)
 
 	return ret;
 }
-
-int CFile::fwrite(const char *format, ...)
-{
-    int result = -1;
-	char * tmp = NULL;
-
-	va_list va;
-	va_start(va, format);
-	if((vasprintf(&tmp, format, va) >= 0) && tmp)
-	{
-        result = this->write((u8 *)tmp, strlen(tmp));
-	}
-	va_end(va);
-
-	if(tmp)
-		free(tmp);
-
-    return result;
-}
-
-

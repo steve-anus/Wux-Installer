@@ -70,6 +70,8 @@ static const u32 cpVertexShaderRegs[] = {
     0x000000ff,0x000000ff,0x000000ff,0x000000ff,
     0x000000ff,0x00000000,0x0000000e,0x00000010
 };
+static_assert(sizeof(cpVertexShaderRegs) == sizeof(((GX2VertexShader*)0)->regs),
+              "cpVertexShaderRegs must match GX2VertexShader::regs");
 
 static const u32 cpPixelShaderProgram[] =
 {
@@ -106,6 +108,8 @@ static const u32 cpPixelShaderRegs[] = {
     0x00000000,0x0000000f,0x00000001,0x00000010,
     0x00000000
 };
+static_assert(sizeof(cpPixelShaderRegs) == sizeof(((GX2PixelShader*)0)->regs),
+              "cpPixelShaderRegs must match GX2PixelShader::regs");
 
 ColorShader * ColorShader::shaderInstance = NULL;
 

@@ -32,6 +32,7 @@ struct ExtractResult {
     std::string outDir;             // first title's folder
     int contentCount = 0;           // content files across all titles
     std::string error;              // human-readable reason on failure
+    std::string note;               // non-fatal accounting info (e.g. partial success)
     std::vector<std::string> outDirs;   // all <outRoot>/<TITLEID> folders
     int titleCount = 0;
 };

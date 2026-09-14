@@ -55,6 +55,8 @@ static const u32 cpVertexShaderRegs[] = {
     0x000000ff,0x000000ff,0x000000ff,0x000000ff,
     0x000000ff,0x00000000,0x0000000e,0x00000010
 };
+static_assert(sizeof(cpVertexShaderRegs) == sizeof(((GX2VertexShader*)0)->regs),
+              "cpVertexShaderRegs must match GX2VertexShader::regs");
 
 static const u32 cpPixelShaderProgram[] =
 {
@@ -162,6 +164,8 @@ static const u32 cpPixelShaderRegs[] = {
     0x00000000,0x0000000f,0x00000001,0x00000010,
     0x00000000
 };
+static_assert(sizeof(cpPixelShaderRegs) == sizeof(((GX2PixelShader*)0)->regs),
+              "cpPixelShaderRegs must match GX2PixelShader::regs");
 
 FXAAShader * FXAAShader::shaderInstance = NULL;
 
@@ -197,19 +201,26 @@ FXAAShader::FXAAShader()
     texCoords = (f32*)memalign(GX2_VERTEX_BUFFER_ALIGNMENT, ciTexCoordsVtxsSize);
 
     //! position vertex structure and texture coordinate vertex structure
+    //! (both fills skipped if their vertex buffers could not be allocated)
     int i = 0;
-    posVtxs[i++] = -1.0f; posVtxs[i++] = -1.0f; posVtxs[i++] = 0.0f;
-    posVtxs[i++] =  1.0f; posVtxs[i++] = -1.0f; posVtxs[i++] = 0.0f;
-    posVtxs[i++] =  1.0f; posVtxs[i++] =  1.0f; posVtxs[i++] = 0.0f;
-    posVtxs[i++] = -1.0f; posVtxs[i++] =  1.0f; posVtxs[i++] = 0.0f;
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, posVtxs, ciPositionVtxsSize);
+    if(posVtxs)
+    {
+        posVtxs[i++] = -1.0f; posVtxs[i++] = -1.0f; posVtxs[i++] = 0.0f;
+        posVtxs[i++] =  1.0f; posVtxs[i++] = -1.0f; posVtxs[i++] = 0.0f;
+        posVtxs[i++] =  1.0f; posVtxs[i++] =  1.0f; posVtxs[i++] = 0.0f;
+        posVtxs[i++] = -1.0f; posVtxs[i++] =  1.0f; posVtxs[i++] = 0.0f;
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, posVtxs, ciPositionVtxsSize);
+    }
 
-    i = 0;
-    texCoords[i++] = 0.0f; texCoords[i++] = 1.0f;
-    texCoords[i++] = 1.0f; texCoords[i++] = 1.0f;
-    texCoords[i++] = 1.0f; texCoords[i++] = 0.0f;
-    texCoords[i++] = 0.0f; texCoords[i++] = 0.0f;
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, texCoords, ciTexCoordsVtxsSize);
+    if(texCoords)
+    {
+        i = 0;
+        texCoords[i++] = 0.0f; texCoords[i++] = 1.0f;
+        texCoords[i++] = 1.0f; texCoords[i++] = 1.0f;
+        texCoords[i++] = 1.0f; texCoords[i++] = 0.0f;
+        texCoords[i++] = 0.0f; texCoords[i++] = 0.0f;
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, texCoords, ciTexCoordsVtxsSize);
+    }
 }
 
 FXAAShader::~FXAAShader()

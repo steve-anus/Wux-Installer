@@ -35,7 +35,15 @@ std::string readName(const U8* data, size_t len, size_t nameOff, U32 nameOffset)
 // slot index where its subtree ends.
 void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
                 int i, int end, const std::string& parentPath,
-                std::vector<FstEntry>& out) {
+                std::vector<FstEntry>& out, int depth, bool* depthTruncated) {
+    if (depth > 32) {
+        // Corrupt nesting must not exhaust the stack. The entry at the
+        // 33rd level itself was already recorded by its parent; only its
+        // subtree is dropped here, and depthTruncated carries it into the
+        // final note.
+        if (depthTruncated) *depthTruncated = true;
+        return;
+    }
     while (i < end) {
         const U8* e = data + entOff + (size_t)i * 0x10;
         if (e + 0x10 > data + len) return;   // bounds guard
@@ -58,11 +66,17 @@ void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
         if (en.isDir) {
             en.lastEntry = raw08;   // raw04 is the parent entry number (unused)
             out.push_back(en);
-            // Subtree occupies slots [i+1, raw08); raw08 is the absolute end.
-            parseRange(data, len, entOff, strOff, i + 1, (int)raw08,
-                       path + "/", out);
-            // A corrupt lastEntry could point backwards; never loop forever.
-            i = (raw08 > (U32)(i + 1)) ? (int)raw08 : i + 1;
+            // Subtree occupies slots [i+1, raw08); a corrupt raw08 is clamped
+            // into the parent's range so recursion can never escape it.
+            U32 sub = raw08;
+            if ((U64)sub > (U64)end) sub = (U32)end;
+            if (sub > (U32)(i + 1)) {
+                parseRange(data, len, entOff, strOff, i + 1, (int)sub,
+                           path + "/", out, depth + 1, depthTruncated);
+                i = (int)sub;
+            } else {
+                ++i;
+            }
         } else {
             en.addrBlocks = raw04;  // section-block units (files)
             en.fileSize = raw08;    // bytes (files)
@@ -79,6 +93,7 @@ Error Fst::parse(const U8* data, size_t len) {
     entries.clear();
     sectionCount = 0;
     sectionBlockSize = fmt::kSectorSize;
+    depthTruncated = false;
 
     if (len < 0x20) return Error::Truncated;
     if (std::memcmp(data, fmt::kFstSignature, 4) != 0) return Error::BadSignature;
@@ -109,12 +124,14 @@ Error Fst::parse(const U8* data, size_t len) {
     const U32 lastEntryNumber = readU32BE(data + entOff + 0x08);
     if (lastEntryNumber < 1) return Error::Truncated;
 
-    // String table follows the node entries.
-    const size_t strOff = entOff + (size_t)lastEntryNumber * 0x10;
-    if (strOff > len) return Error::Truncated;
+    // String table follows the node entries. The multiply is done in 64-bit:
+    // a corrupt lastEntryNumber would otherwise wrap and slip past the bound.
+    const U64 candidate = (U64)entOff + (U64)lastEntryNumber * 0x10ULL;
+    if (candidate > (U64)len) return Error::Truncated;
+    const size_t strOff = (size_t)candidate;
 
     parseRange(data, len, entOff, strOff, 1, (int)lastEntryNumber,
-               std::string(), entries);
+               std::string(), entries, 0, &depthTruncated);
     return Error::Ok;
 }
 

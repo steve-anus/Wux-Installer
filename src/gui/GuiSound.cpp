@@ -64,7 +64,9 @@ bool GuiSound::Load(const char * filepath)
     }
 
     if(voice < 0)
+    {
         return false;
+    }
 
 	return true;
 }
@@ -98,7 +100,9 @@ bool GuiSound::Load(const u8 * snd, s32 len)
     }
 
     if(voice < 0)
+    {
         return false;
+    }
 
 	return true;
 }
@@ -122,8 +126,17 @@ void GuiSound::Stop()
         if((v->getState() != Voice::STATE_STOP) && (v->getState() != Voice::STATE_STOPPED))
             v->setState(Voice::STATE_STOP);
 
-        while(v->getState() != Voice::STATE_STOPPED)
+        // Bound the hand-off: only the AX frame callback drives a voice to
+        // STATE_STOPPED, and it stops being called during app teardown
+        // (same reasoning as the 20 ms cap in SoundHandler::RemoveDecoder).
+        int waitCount = 0;
+        while(v->getState() != Voice::STATE_STOPPED && waitCount++ < 20)
             usleep(1000);
+        if(v->getState() != Voice::STATE_STOPPED)
+        {
+            v->stop();
+            v->setState(Voice::STATE_STOPPED);
+        }
     }
 
     SoundDecoder * decoder = SoundHandler::instance()->getDecoder(voice);
@@ -161,7 +174,9 @@ bool GuiSound::IsPlaying()
 {
     Voice * v = SoundHandler::instance()->getVoice(voice);
     if(v)
+    {
         return v->getState() == Voice::STATE_PLAYING;
+    }
 
 	return false;
 

@@ -20,7 +20,7 @@
  *                                                                               *
  *********************************************************************************
  *
- * 
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -77,6 +77,11 @@ public:
 
     std::vector<FstSection> sections;          // indexed by section number
     std::vector<FstEntry>   entries;           // flat, in depth-first order
+
+    // Set by parse() when a corrupt nesting depth forced a subtree to be
+    // dropped (the entry list is then truncated but still valid); the parse
+    // itself returns Ok so hardware-verified flows keep working.
+    bool depthTruncated = false;
 
     // data is the DECRYPTED FST blob. On success, sections and entries are
     // populated; sectionBlockSize and sectionCount reflect the header.

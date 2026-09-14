@@ -8,49 +8,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <coreinit/filesystem.h>
+#include "utils/logger.h"
 
-#define FS_MAX_MOUNTPATH_SIZE           128
-
-int MountFS(void *pClient, void *pCmd, char **mount_path)
-{
-    int result = -1;
-
-    void *mountSrc = malloc(sizeof(FSMountSource));
-    if(!mountSrc)
-        return -3;
-
-    char* mountPath = (char*) malloc(FS_MAX_MOUNTPATH_SIZE);
-    if(!mountPath) {
-        free(mountSrc);
-        return -4;
-    }
-
-    memset(mountSrc, 0, sizeof(FSMountSource));
-    memset(mountPath, 0, FS_MAX_MOUNTPATH_SIZE);
-
-    // Mount sdcard
-    if (FSGetMountSource(pClient, pCmd, FS_MOUNT_SOURCE_SD, mountSrc, -1) == 0)
-    {
-        result = FSMount(pClient, pCmd, mountSrc, mountPath, FS_MAX_MOUNTPATH_SIZE, -1);
-        if((result == 0) && mount_path) {
-            *mount_path = (char*)malloc(strlen(mountPath) + 1);
-            if(*mount_path)
-                strcpy(*mount_path, mountPath);
-        }
-    }
-
-    free(mountPath);
-    free(mountSrc);
-    return result;
-}
-
-int UmountFS(void *pClient, void *pCmd, const char *mountPath)
-{
-    int result = -1;
-    result = FSUnmount(pClient, pCmd, mountPath, -1);
-
-    return result;
-}
 
 int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 {
@@ -63,7 +22,27 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 	if (iFd < 0)
 		return -1;
 
-	u32 filesize = lseek(iFd, 0, SEEK_END);
+	off_t off = lseek(iFd, 0, SEEK_END);
+	if(off < 0)
+	{
+		close(iFd);
+		return -4;
+	}
+	if(off == 0)
+	{
+		//! Empty file: nothing to load, input stays NULL/0.
+		close(iFd);
+		return 0;
+	}
+	if(off > (off_t)32 * 1024 * 1024)
+	{
+		//! Only bundled content is loaded through here; a size this absurd
+		//! indicates a corrupt file - refuse instead of trying to allocate.
+		close(iFd);
+		return -5;
+	}
+
+	u32 filesize = (u32)off;
     lseek(iFd, 0, SEEK_SET);
 
 	u8 *buffer = (u8 *) malloc(filesize);
@@ -100,89 +79,11 @@ int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size)
 
     //! sign is optional input
     if(size)
+    {
         *size = filesize;
+    }
 
 	return filesize;
-}
-
-int CheckFile(const char * filepath)
-{
-	if(!filepath)
-		return 0;
-
-	struct stat filestat;
-
-	char dirnoslash[strlen(filepath)+2];
-	snprintf(dirnoslash, sizeof(dirnoslash), "%s", filepath);
-
-	while(dirnoslash[strlen(dirnoslash)-1] == '/')
-		dirnoslash[strlen(dirnoslash)-1] = '\0';
-
-	char * notRoot = strrchr(dirnoslash, '/');
-	if(!notRoot)
-	{
-		strcat(dirnoslash, "/");
-	}
-
-	if (stat(dirnoslash, &filestat) == 0)
-		return 1;
-
-	return 0;
-}
-
-int CreateSubfolder(const char * fullpath)
-{
-	if(!fullpath)
-		return 0;
-
-	int result = 0;
-
-	char dirnoslash[strlen(fullpath)+1];
-	strcpy(dirnoslash, fullpath);
-
-	int pos = strlen(dirnoslash)-1;
-	while(dirnoslash[pos] == '/')
-	{
-		dirnoslash[pos] = '\0';
-		pos--;
-	}
-
-	if(CheckFile(dirnoslash))
-	{
-		return 1;
-	}
-	else
-	{
-		char parentpath[strlen(dirnoslash)+2];
-		strcpy(parentpath, dirnoslash);
-		char * ptr = strrchr(parentpath, '/');
-
-		if(!ptr)
-		{
-			//!Device root directory (must be with '/')
-			strcat(parentpath, "/");
-			struct stat filestat;
-			if (stat(parentpath, &filestat) == 0)
-				return 1;
-
-			return 0;
-		}
-
-		ptr++;
-		ptr[0] = '\0';
-
-		result = CreateSubfolder(parentpath);
-	}
-
-	if(!result)
-		return 0;
-
-	if (mkdir(dirnoslash, 0777) == -1)
-	{
-		return 0;
-	}
-
-	return 1;
 }
 
 int RemoveDirectory(const char *path)
@@ -221,6 +122,8 @@ int RemoveDirectory(const char *path)
 					else
 						r2 = unlink(buf);
 				}
+				else
+					log_printf("RemoveDirectory: stat failed for %s", buf);
 				free(buf);
 			}
 			r = r2;
@@ -242,6 +145,10 @@ int RemoveDirectory(const char *path)
 void RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt)
 {
 	if (RemoveDirectory(path) != 0)
+		return;
+
+	// Ancestors may only be walked with an explicit stop boundary.
+	if (!stopAt)
 		return;
 
 	char parent[512];

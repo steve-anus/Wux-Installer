@@ -49,7 +49,7 @@ class Scrollbar : public GuiElement, public sigslot::has_slots<>
 		void SetSelected(int selItem, int selIndex);
 		void SetEntrieCount(int cnt);
 	protected:
-		void setScrollboxPosition(int SelItem, int SelInd);
+		void setScrollboxPosition(int item, int ind);
 		void OnUpButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 		void OnDownButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 		void OnBoxButtonHold(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);

@@ -63,7 +63,7 @@ Error extractH3(const U8* header, const U8* h3Region, size_t h3RegionLen,
                 int index, std::vector<U8>& out) {
     if (header == nullptr || h3Region == nullptr || index < 0)
         return Error::Truncated;
-        
+
     const U32 h3ListSize = readU32BE(header + 0x0C);
     const U32 numArrays  = readU32BE(header + 0x10);
     if (h3RegionLen < h3ListSize)
@@ -73,15 +73,19 @@ Error extractH3(const U8* header, const U8* h3Region, size_t h3RegionLen,
     // from table entry i = k + 1 (table entries i = 1 .. numArrays-1, each a u32
     // offset into the region; the last entry ends at the region size).
     const U32 i = (U32)index + 1;
-    if (i < 1 || i >= numArrays)
+    if (i >= numArrays)
         return Error::NotFound;
     const U64 offPos = (U64)i * 0x04;
     if (offPos + 4 > h3RegionLen)
         return Error::Truncated;
     const U32 curOffset = readU32BE(h3Region + offPos);
-    const U32 curEnd = (i < numArrays - 1)
-        ? readU32BE(h3Region + (U64)(i + 1) * 0x04)
-        : h3ListSize;
+    U32 curEnd = h3ListSize;
+    if (i < numArrays - 1) {
+        const U64 nextPos = (U64)(i + 1) * 0x04;
+        if (nextPos + 4 > h3RegionLen)
+            return Error::Truncated;
+        curEnd = readU32BE(h3Region + nextPos);
+    }
     if ((U64)curOffset >= h3ListSize || (U64)curEnd > h3ListSize || curOffset > curEnd)
         return Error::Truncated;
     out.assign(h3Region + curOffset, h3Region + curEnd);

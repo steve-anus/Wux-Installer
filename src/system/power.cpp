@@ -23,7 +23,14 @@ bool isEnabledAutoPowerDown()
 	bool enabled = false;
 	unsigned int apd_enabled = 0;
 	
-	IMIsAPDEnabled(&apd_enabled);
+	IMError err = IMIsAPDEnabled(&apd_enabled);
+	if(err != 0)
+	{
+		//! Query failed: report "enabled" so the caller disables APD
+		//! defensively rather than risk a powerdown mid-install.
+		log_printf("Auto Power Down query failed (%d), assuming enabled\n", (int)err);
+		return true;
+	}
 	
 	if(apd_enabled)
 	{
@@ -38,11 +45,14 @@ bool disableAutoPowerDown()
 {
 	bool res = false;
 	
-	if(IMDisableAPD() == 0) //!APD disabled
+	IMError err = IMDisableAPD();
+	if(err == 0) //!APD disabled
 	{
 		res = true;
 		log_printf("Auto Power Down disabled\n");
 	}
+	else
+		log_printf("Auto Power Down disable failed (%d)\n", (int)err);
 	
 	return res;
 }
@@ -51,11 +61,14 @@ bool enableAutoPowerDown()
 {
 	bool res = false;
 	
-	if(IMEnableAPD() == 0) //!APD enabled
+	IMError err = IMEnableAPD();
+	if(err == 0) //!APD enabled
 	{
 		res = true;
 		log_printf("Auto Power Down re-enabled\n");
 	}
+	else
+		log_printf("Auto Power Down re-enable failed (%d)\n", (int)err);
 	
 	return res;
 }

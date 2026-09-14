@@ -20,18 +20,21 @@
 #include "system/memory.h"
 #include "shaders/Texture2DShader.h"
 #include "shaders/ColorShader.h"
-#include "shaders/Shader3D.h"
-#include "shaders/ShaderFractalColor.h"
 #include "shaders/FXAAShader.h"
 #include "utils/utils.h"
+#include "utils/logger.h"
 
 CVideo::CVideo(s32 forceTvScanMode, s32 forceDrcScanMode)
 {
     tvEnabled = false;
     drcEnabled = false;
+    tvAaInMem1 = false;
+    drcAaInMem1 = false;
 
     //! allocate MEM2 command buffer memory
     gx2CommandBuffer = MEM2_alloc(GX2_COMMAND_BUFFER_SIZE, 0x40);
+    if(!gx2CommandBuffer)
+        log_printf("CVideo: command buffer allocation failed\n");
 
     //! initialize GX2 command buffer
     u32 gx2_init_attributes[9];
@@ -89,19 +92,32 @@ CVideo::CVideo(s32 forceTvScanMode, s32 forceDrcScanMode)
     //! calculate the size needed for the TV scan buffer and allocate the buffer from bucket memory
     GX2CalcTVSize((GX2TVRenderMode)tvRenderMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE, &scanBufferSize, &scaleNeeded);
     tvScanBuffer = MEMBucket_alloc(scanBufferSize, GX2_SCAN_BUFFER_ALIGNMENT);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvScanBuffer, scanBufferSize);
-    GX2SetTVBuffer(tvScanBuffer, scanBufferSize, (GX2TVRenderMode)tvRenderMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
+    if(tvScanBuffer)
+    {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvScanBuffer, scanBufferSize);
+        GX2SetTVBuffer(tvScanBuffer, scanBufferSize, (GX2TVRenderMode)tvRenderMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
+    }
+    else
+        log_printf("CVideo: TV scan buffer allocation failed\n");
 
     //! calculate the size needed for the DRC scan buffer and allocate the buffer from bucket memory
     GX2CalcDRCSize((GX2DrcRenderMode)drcScanMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE, &scanBufferSize, &scaleNeeded);
     drcScanBuffer = MEMBucket_alloc(scanBufferSize, GX2_SCAN_BUFFER_ALIGNMENT);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcScanBuffer, scanBufferSize);
-    GX2SetDRCBuffer(drcScanBuffer, scanBufferSize, (GX2DrcRenderMode)drcScanMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
+    if(drcScanBuffer)
+    {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcScanBuffer, scanBufferSize);
+        GX2SetDRCBuffer(drcScanBuffer, scanBufferSize, (GX2DrcRenderMode)drcScanMode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
+    }
+    else
+        log_printf("CVideo: DRC scan buffer allocation failed\n");
 
     //! Setup color buffer for TV rendering
     GX2InitColorBuffer(&tvColorBuffer, GX2_SURFACE_DIM_TEXTURE_2D, tvWidth, tvHeight, 1, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, (GX2AAMode)tvAAMode);
     tvColorBuffer.surface.image = MEM1_alloc(tvColorBuffer.surface.imageSize, tvColorBuffer.surface.alignment);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvColorBuffer.surface.image, tvColorBuffer.surface.imageSize);
+    if(tvColorBuffer.surface.image)
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvColorBuffer.surface.image, tvColorBuffer.surface.imageSize);
+    else
+        log_printf("CVideo: TV color buffer allocation failed\n");
 
     //! due to AA we can only use 16 bit depth buffer in MEM1 otherwise we would have to switch to mem2 for depth buffer
     //! this should be ok for our purpose i guess
@@ -110,29 +126,48 @@ CVideo::CVideo(s32 forceTvScanMode, s32 forceDrcScanMode)
     u32 size, align;
     GX2InitDepthBuffer(&tvDepthBuffer, GX2_SURFACE_DIM_TEXTURE_2D, tvColorBuffer.surface.width, tvColorBuffer.surface.height, 1, GX2_SURFACE_FORMAT_FLOAT_R32, (GX2AAMode)tvAAMode);
     tvDepthBuffer.surface.image = MEM1_alloc(tvDepthBuffer.surface.imageSize, tvDepthBuffer.surface.alignment);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvDepthBuffer.surface.image, tvDepthBuffer.surface.imageSize);
+    if(tvDepthBuffer.surface.image)
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvDepthBuffer.surface.image, tvDepthBuffer.surface.imageSize);
+    else
+        log_printf("CVideo: TV depth buffer allocation failed\n");
 
     //! Setup TV HiZ buffer
     GX2CalcDepthBufferHiZInfo(&tvDepthBuffer, &size, &align);
     tvDepthBuffer.hiZPtr = MEM1_alloc(size, align);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvDepthBuffer.hiZPtr, size);
-    GX2InitDepthBufferHiZEnable(&tvDepthBuffer, GX2_ENABLE);
+    if(tvDepthBuffer.hiZPtr)
+    {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvDepthBuffer.hiZPtr, size);
+        GX2InitDepthBufferHiZEnable(&tvDepthBuffer, GX2_ENABLE);
+    }
+    else
+        log_printf("CVideo: TV HiZ allocation failed\n");
 
     //! Setup color buffer for DRC rendering
     GX2InitColorBuffer(&drcColorBuffer, GX2_SURFACE_DIM_TEXTURE_2D, 854, 480, 1, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, (GX2AAMode)drcAAMode);
     drcColorBuffer.surface.image = MEM1_alloc(drcColorBuffer.surface.imageSize, drcColorBuffer.surface.alignment);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcColorBuffer.surface.image, drcColorBuffer.surface.imageSize);
+    if(drcColorBuffer.surface.image)
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcColorBuffer.surface.image, drcColorBuffer.surface.imageSize);
+    else
+        log_printf("CVideo: DRC color buffer allocation failed\n");
 
     //! Setup DRC depth buffer (can be the same for both if rendered one after another)
     GX2InitDepthBuffer(&drcDepthBuffer, GX2_SURFACE_DIM_TEXTURE_2D, drcColorBuffer.surface.width, drcColorBuffer.surface.height, 1, GX2_SURFACE_FORMAT_FLOAT_R32, (GX2AAMode)drcAAMode);
     drcDepthBuffer.surface.image = MEM1_alloc(drcDepthBuffer.surface.imageSize, drcDepthBuffer.surface.alignment);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcDepthBuffer.surface.image, drcDepthBuffer.surface.imageSize);
+    if(drcDepthBuffer.surface.image)
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcDepthBuffer.surface.image, drcDepthBuffer.surface.imageSize);
+    else
+        log_printf("CVideo: DRC depth buffer allocation failed\n");
 
     //! Setup DRC HiZ buffer
     GX2CalcDepthBufferHiZInfo(&drcDepthBuffer, &size, &align);
     drcDepthBuffer.hiZPtr = MEM1_alloc(size, align);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcDepthBuffer.hiZPtr, size);
-    GX2InitDepthBufferHiZEnable(&drcDepthBuffer, GX2_ENABLE);
+    if(drcDepthBuffer.hiZPtr)
+    {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcDepthBuffer.hiZPtr, size);
+        GX2InitDepthBufferHiZEnable(&drcDepthBuffer, GX2_ENABLE);
+    }
+    else
+        log_printf("CVideo: DRC HiZ allocation failed\n");
 
 
     //! allocate auxilary buffer last as there might not be enough MEM1 left for other stuff after that
@@ -141,12 +176,18 @@ CVideo::CVideo(s32 forceTvScanMode, s32 forceDrcScanMode)
         u32 auxSize, auxAlign;
         GX2CalcColorBufferAuxInfo(&tvColorBuffer, &auxSize, &auxAlign);
         tvColorBuffer.aaBuffer = MEM1_alloc(auxSize, auxAlign);
+        tvAaInMem1 = (tvColorBuffer.aaBuffer != NULL);
         if(!tvColorBuffer.aaBuffer)
             tvColorBuffer.aaBuffer = MEM2_alloc(auxSize, auxAlign);
 
         tvColorBuffer.aaSize = auxSize;
-        memset(tvColorBuffer.aaBuffer, GX2_AA_BUFFER_CLEAR_VALUE, auxSize);
-        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvColorBuffer.aaBuffer, auxSize);
+        if(tvColorBuffer.aaBuffer)
+        {
+            memset(tvColorBuffer.aaBuffer, GX2_AA_BUFFER_CLEAR_VALUE, auxSize);
+            GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tvColorBuffer.aaBuffer, auxSize);
+        }
+        else
+            log_printf("CVideo: TV AA buffer allocation failed\n");
     }
 
     if (drcColorBuffer.surface.aa)
@@ -154,20 +195,32 @@ CVideo::CVideo(s32 forceTvScanMode, s32 forceDrcScanMode)
         u32 auxSize, auxAlign;
         GX2CalcColorBufferAuxInfo(&drcColorBuffer, &auxSize, &auxAlign);
         drcColorBuffer.aaBuffer = MEM1_alloc(auxSize, auxAlign);
+        drcAaInMem1 = (drcColorBuffer.aaBuffer != NULL);
         if(!drcColorBuffer.aaBuffer)
             drcColorBuffer.aaBuffer = MEM2_alloc(auxSize, auxAlign);
         drcColorBuffer.aaSize = auxSize;
-        memset(drcColorBuffer.aaBuffer, GX2_AA_BUFFER_CLEAR_VALUE, auxSize);
-        GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcColorBuffer.aaBuffer, auxSize);
+        if(drcColorBuffer.aaBuffer)
+        {
+            memset(drcColorBuffer.aaBuffer, GX2_AA_BUFFER_CLEAR_VALUE, auxSize);
+            GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drcColorBuffer.aaBuffer, auxSize);
+        }
+        else
+            log_printf("CVideo: DRC AA buffer allocation failed\n");
     }
 
     //! allocate memory and setup context state TV
     tvContextState = (GX2ContextState*)MEM2_alloc(sizeof(GX2ContextState), GX2_CONTEXT_STATE_ALIGNMENT);
-    GX2SetupContextStateEx(tvContextState, GX2_TRUE);
+    if(tvContextState)
+        GX2SetupContextStateEx(tvContextState, GX2_TRUE);
+    else
+        log_printf("CVideo: TV context state allocation failed\n");
 
     //! allocate memory and setup context state DRC
     drcContextState = (GX2ContextState*)MEM2_alloc(sizeof(GX2ContextState), GX2_CONTEXT_STATE_ALIGNMENT);
-    GX2SetupContextStateEx(drcContextState, GX2_TRUE);
+    if(drcContextState)
+        GX2SetupContextStateEx(drcContextState, GX2_TRUE);
+    else
+        log_printf("CVideo: DRC context state allocation failed\n");
 
     //! set initial context state and render buffers
     GX2SetContextState(tvContextState);
@@ -227,17 +280,17 @@ CVideo::~CVideo()
     //! free context buffers
     MEM2_free(tvContextState);
     MEM2_free(drcContextState);
-    //! free aux buffer
+    //! free aux buffer - release through the allocator it came from
     if(tvColorBuffer.aaBuffer)
     {
-        if(((u32)tvColorBuffer.aaBuffer & 0xF0000000) == 0xF0000000)
+        if(tvAaInMem1)
             MEM1_free(tvColorBuffer.aaBuffer);
         else
             MEM2_free(tvColorBuffer.aaBuffer);
     }
     if(drcColorBuffer.aaBuffer)
     {
-        if(((u32)drcColorBuffer.aaBuffer & 0xF0000000) == 0xF0000000)
+        if(drcAaInMem1)
             MEM1_free(drcColorBuffer.aaBuffer);
         else
             MEM2_free(drcColorBuffer.aaBuffer);
@@ -245,8 +298,6 @@ CVideo::~CVideo()
     //! destroy shaders
     ColorShader::destroyInstance();
     FXAAShader::destroyInstance();
-    Shader3D::destroyInstance();
-    ShaderFractalColor::destroyInstance();
     Texture2DShader::destroyInstance();
 }
 
@@ -264,24 +315,4 @@ void CVideo::renderFXAA(const GX2Texture * texture, const GX2Sampler *sampler)
     FXAAShader::instance()->setTextureAndSampler(texture, sampler);
     FXAAShader::instance()->draw();
     GX2SetDepthOnlyControl(GX2_ENABLE, GX2_ENABLE, GX2_COMPARE_FUNC_LEQUAL);
-}
-
-void* CVideo::GX2RAlloc(u32 flags, u32 size, u32 align)
-{
-    //! min. alignment
-    if (align < 4)
-        align = 4;
-
-    if ((flags & 0x2040E) && !(flags & 0x40000))
-        return MEM1_alloc(size, align);
-    else
-        return MEM2_alloc(size, align);
-}
-
-void CVideo::GX2RFree(u32 flags, void* p)
-{
-    if ((flags & 0x2040E) && !(flags & 0x40000))
-        MEM1_free(p);
-    else
-        MEM2_free(p);
 }

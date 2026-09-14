@@ -68,8 +68,9 @@ protected:
 
 	static SoundHandler * handlerInstance;
 
-	bool Decoding;
-	bool ExitRequested;
+	//! shared between the frame callback, decode thread and teardown paths
+	volatile bool Decoding;
+	volatile bool ExitRequested;
 
 	Voice * voiceList[MAX_DECODERS];
 	SoundDecoder * DecoderList[MAX_DECODERS];

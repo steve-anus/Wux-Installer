@@ -22,8 +22,13 @@
 #include "system/CThread.h"
 #include "utils/utils.h"
 
-// forward declaration
-//class FreeTypeGX;
+// Declared here rather than inherited through the headers above: the members
+// below are pointers, so a forward declaration is all this class needs, and
+// relying on an include chain that another header may drop is what broke the
+// build when MainWindow.h stopped pulling in the gui umbrella.
+class GuiSound;
+class FreeTypeGX;
+class GuiController;
 
 class Application : public CThread
 {

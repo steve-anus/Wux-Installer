@@ -19,6 +19,7 @@
 
 #include <malloc.h>
 #include <coreinit/mutex.h>
+#include "utils/logger.h"
 
 class CMutex
 {
@@ -26,7 +27,12 @@ public:
     CMutex() {
         pMutex = (OSMutex*) malloc(sizeof(OSMutex));
         if(!pMutex)
+        {
+            //! Fail-open: lock/unlock degrade to no-ops. Loud, because every
+            //! caller assumes mutual exclusion.
+            log_printf("CMutex: failed to allocate OSMutex, locking is inactive\n");
             return;
+        }
 
         OSInitMutex(pMutex);
     }
@@ -51,19 +57,6 @@ public:
     }
 private:
     OSMutex *pMutex;
-};
-
-class CMutexLock
-{
-public:
-    CMutexLock() {
-        mutex.lock();
-    }
-    virtual ~CMutexLock() {
-        mutex.unlock();
-    }
-private:
-    CMutex mutex;
 };
 
 #endif // _CMUTEX_H_

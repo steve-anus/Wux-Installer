@@ -29,20 +29,27 @@
 #include <coreinit/filesystem.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <string.h>
 
 #define MCP_COMMAND_INSTALL_ASYNC   0x81
 #define MAX_INSTALL_PATH_LENGTH     0x27F
 
-static int installCompleted = 0;
-static u32 installError = 0;
+static std::atomic<int> installCompleted(0);
+static std::atomic<u32> installError(0);
+// Identity token of the install the wait loop currently follows.
+// IOS_IoctlvAsync echoes the context pointer back to the callback, so a
+// late callback from an abandoned install (stall/cancel break-out) cannot
+// publish into the flags and fake the next title's result.
+static std::atomic<u32> installGen(0);
 
 extern "C" MCPError MCP_GetLastRawError(void);
 
-static void* IosInstallCallback(IOSError errorCode, void * priv_data)
+static void IosInstallCallback(IOSError errorCode, void * priv_data)
 {
+	if((u32)(uintptr_t)priv_data != installGen.load())
+		return; // stale callback from an abandoned install
 	installError = errorCode;
 	installCompleted = 1;
-	return 0;
 }
 
 // The POSIX layer on the Wii U (wut's newlib glue) removes files through the
@@ -80,47 +87,52 @@ static bool deleteViaFsClient(const std::string &fsPath)
 // success tail and the WUX skip).
 static const char *stopAtFor(const std::string &path)
 {
-	if (path.find(SD_INSTALL_PATH) == 0)
+	// The prefix must end at a directory boundary: "install" must not match
+	// "installation", and a match must have a folder name after the slash.
+	auto below = [&path](const char *prefix) {
+		size_t len = strlen(prefix);
+		return path.size() > len + 1 && path.compare(0, len, prefix) == 0 &&
+		       path[len] == '/';
+	};
+	if (below(SD_INSTALL_PATH))
 		return SD_INSTALL_PATH;
-	if (path.find(SD_WUDUMP_PATH) == 0)
+	if (below(SD_WUDUMP_PATH))
 		return SD_WUDUMP_PATH;
 	return NULL;
 }
 
-InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall,
-                             bool skipConfirm, bool askDelete,
-                             const std::vector<std::string> &cleanupFiles,
-                             bool wuxFlow)
+InstallWindow::InstallWindow(CFolderList * list, const InstallOptions & options)
 	: GuiFrame(0, 0)
 	, CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff)
 	, folderList(list)
-	, deleteAfterInstall(deleteAfterInstall)
-	, askDelete(askDelete)
+	, deleteAfterInstall(options.deleteAfterInstall)
+	, askDelete(options.askDelete)
 	, deleteWuxFiles(false)
-	, wuxFlow(wuxFlow)
+	, wuxFlow(options.wuxFlow)
 	, installedCount(0)
 	, skippedCount(0)
 	, lastWasSkip(false)
 	, wuxDeleteFailed(false)
-	, cleanupFiles(cleanupFiles)
+	, cleanupFiles(options.cleanupFiles)
+	, finalNote(options.finalNote)
 {
 	mainWindow = Application::instance()->getMainWindow();
 	
 	folderCount = folderList->GetSelectedCount();
 	
-	if(skipConfirm && folderCount > 0)
+	if(options.skipConfirm && folderCount > 0)
 	{
 		// WUX flow: the folders were selected by code, so skip the
 		// "are you sure" prompt and go straight to the destination question.
 		messageBox = new MessageBox(MessageBox::BT_DEST, MessageBox::IT_ICONQUESTION, false);
 		messageBox->setTitle("Where do you want to install?");
-		messageBox->setMessage1(fmt("%d application(s)", folderCount));
+		messageBox->setMessage1(strfmt("%d application(s)", folderCount));
 		messageBox->messageYesClicked.connect(this, &InstallWindow::OnDestinationChoice);
 		messageBox->messageNoClicked.connect(this, &InstallWindow::OnDestinationChoice);
 	}
 	else if(folderCount > 0)
 	{
-		std::string message = fmt("%d application(s)", folderCount);
+		std::string message = strfmt("%d application(s)", folderCount);
 		messageBox = new MessageBox(MessageBox::BT_YESNO, MessageBox::IT_ICONQUESTION, false);
 		messageBox->setTitle("Are you sure you want to install:");
 		messageBox->setMessage1(message);
@@ -188,7 +200,7 @@ void InstallWindow::OnDestinationChoice(GuiElement * element, int choice)
 		std::string fileName = cleanupFiles.empty() ? std::string()
 			: cleanupFiles[0].substr(cleanupFiles[0].find_last_of('/') + 1);
 		messageBox->reload("Delete files after install?",
-			fmt("Delete %s, game.key and extracted files from the SD card after a successful install?",
+			strfmt("Delete %s, game.key and extracted files from the SD card after a successful install?",
 			    fileName.c_str()),
 			"", MessageBox::BT_YESNO, MessageBox::IT_ICONQUESTION);
 		messageBox->messageYesClicked.connect(this, &InstallWindow::OnDeleteChoice);
@@ -248,8 +260,10 @@ void InstallWindow::executeThread()
 				{
 					time--;
 					startTime = OSGetTime();
-					messageBox->setMessage2(fmt("Starting next installation in %d second(s)", time));
+					messageBox->setMessage2(strfmt("Starting next installation in %d second(s)", time));
 				}
+
+				usleep(100 * 1000);
 			}
 			
 			messageBox->messageCancelClicked.disconnect(this);
@@ -280,9 +294,9 @@ void InstallWindow::executeThread()
 			// The .wux image and game.key (in /wudump) are removed after the
 			// last processed title, but only if something really installed
 			// (retry-friendly otherwise). common.key is never in
-			// cleanupFiles. A failed POSIX unlink (the same layer the fork's
-			// RemoveDirectory uses for /install) falls back to the coreinit
-			// FS client; both outcomes are logged for the hardware debug.
+			// cleanupFiles. A failed POSIX unlink (the same layer that removes
+			// the extracted /install folders) falls back to the coreinit FS
+			// client; both outcomes are logged for the hardware debug.
 			if(deleteWuxFiles)
 			{
 				for(size_t i = 0; i < cleanupFiles.size(); ++i)
@@ -310,8 +324,26 @@ void InstallWindow::executeThread()
 				note += strfmt("Skipped %d non-installable title(s) (already on the console).",
 				               skippedCount);
 			}
+			if(!finalNote.empty())
+			{
+				if(!note.empty())
+					note += " ";
+				note += finalNote;
+			}
 
-			messageBox->reload("Successfully installed", lastGoodName, note,
+			if(!note.empty())
+				log_printf("InstallWindow: finalize note: %s", note.c_str());
+
+			// Keep the box readable: the message2 line gets at most ~120
+			// characters; the full note is always in the SD log (above).
+			std::string boxNote = note;
+			if(boxNote.size() > 120)
+			{
+				boxNote.resize(117);
+				boxNote += "...";
+			}
+
+			messageBox->reload("Successfully installed", lastGoodName, boxNote,
 			                   MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
 			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
 		}
@@ -336,7 +368,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 {
 	int index = folderList->GetFirstSelected();
 	
-	std::string title = fmt("Installing... (%d/%d)", pos, total);
+	std::string title = strfmt("Installing... (%d/%d)", pos, total);
 	std::string gameName = folderList->GetName(index);
 	
 	lastWasSkip = false;
@@ -348,6 +380,14 @@ void InstallWindow::InstallProcess(int pos, int total)
 	/////////////////////////////
 	
 	int result = 0;
+	// Set when the wait loop breaks while the async install request is
+	// still in flight; the tail must then keep everything IOS may use.
+	bool abandonedInstall = false;
+	// Fresh identity for this install before anything is submitted: a
+	// callback still pending from an earlier abandoned install carries the
+	// old identity and is dropped by IosInstallCallback instead of faking
+	// a completion here.
+	u32 myGen = installGen.fetch_add(1) + 1;
 	installCompleted = 0;
 	installError = 0;
 	
@@ -379,8 +419,21 @@ void InstallWindow::InstallProcess(int pos, int total)
 			}
 			
 			std::string installFolder = folderList->GetPath(index);
-			installFolder.erase(0, 19);
-			installFolder.insert(0, "/vol/app_sd/");
+			// MCP reads through the app's own FS mount: the browser's
+			// "fs:/vol/external01/" prefix becomes "/vol/app_sd/". Compare
+			// the prefix instead of blindly erasing 19 bytes; a path that
+			// does not match cannot be installed by this flow.
+			static const char fsPrefix[] = "fs:/vol/external01/";
+			const size_t fsPrefixLen = sizeof(fsPrefix) - 1;
+			if (installFolder.size() <= fsPrefixLen ||
+			    installFolder.compare(0, fsPrefixLen, fsPrefix) != 0)
+			{
+				messageBox->reload("Install failed", gameName, "Folder path is not under the SD card mount.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+				result = -12;
+				break;
+			}
+			installFolder = std::string("/vol/app_sd/") +
+			                installFolder.substr(fsPrefixLen);
             
             snprintf(installPath, sizeof(installPath), "%s", installFolder.c_str());
 			
@@ -396,8 +449,9 @@ void InstallWindow::InstallProcess(int pos, int total)
 			u32 titleIdHigh = mcpInstallInfo[0];
 			u32 titleIdLow = mcpInstallInfo[1];
 			bool spoofFiles = false;
-			// The 0x was missing here: 00050010 is OCTAL (= 0x5008), so the
-			// Version.bin spoof never matched. Restores the fork's intent.
+			// The 0x prefix was missing originally: "00050010" is octal
+			// (= 0x5008), so this spoof branch never matched; the intended
+			// category is 0x00050010.
 			if ((titleIdHigh == 0x00050010)
 				&&(	   (titleIdLow == 0x10041000)     // JAP Version.bin
 					|| (titleIdLow == 0x10041100)     // USA Version.bin
@@ -419,7 +473,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				res = MCP_InstallSetTargetDevice(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, fmt("MCP_InstallSetTargetDevice 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallSetTargetDevice 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					//if (installToUsb)
 					//	__os_snprintf(errorText2, sizeof(errorText2), "Possible USB HDD disconnected or failure");
 					result = -5;
@@ -428,7 +482,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				res = MCP_InstallSetTargetUsb(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, fmt("MCP_InstallSetTargetUsb 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallSetTargetUsb 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					//if (installToUsb)
 					//	__os_snprintf(errorText2, sizeof(errorText2), "Possible USB HDD disconnected or failure");
 					result = -6;
@@ -447,16 +501,37 @@ void InstallWindow::InstallProcess(int pos, int total)
 				mcpPathInfoVector->vaddr = mcpInstallPath;
 				mcpPathInfoVector->len = (unsigned int)MAX_INSTALL_PATH_LENGTH;
 				
-				res = IOS_IoctlvAsync(mcpHandle, MCP_COMMAND_INSTALL_ASYNC, 1, 0, mcpPathInfoVector, (IOSAsyncCallbackFn)IosInstallCallback, mcpInstallInfo);
+				res = IOS_IoctlvAsync(mcpHandle, MCP_COMMAND_INSTALL_ASYNC, 1, 0, mcpPathInfoVector, IosInstallCallback, (void *)(uintptr_t)myGen);
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, fmt("MCP_InstallTitleAsync 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallTitleAsync 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					result = -7;
 					break;
 				}
 				
+				// Wait for the IOS callback. There is deliberately no overall
+				// time cap (multi-GB installs legitimately run for minutes).
+				// The 5-minute stall detector only arms once MCP has
+				// published a progress record: long prepare/commit phases
+				// can hold the byte counter at zero legitimately. A run
+				// that never gets any record escapes at 30 minutes. The
+				// canceled check is defence in depth (this box has no
+				// button while installing).
+				bool sawRecord = false;
+				u64 lastSeenBytes = 0;
+				u64 stallStart = OSGetTime();
+				const u64 loopStart = stallStart;
 				while(!installCompleted)
 				{
+					if(canceled)
+					{
+						messageBox->reload("Install failed", gameName, "The install was stopped.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						result = -11;
+						abandonedInstall = true;
+						installGen.fetch_add(1); // drop the still-pending callback
+						break;
+					}
+
 					memset(mcpInstallInfo, 0, 0x24);
 					
 					MCP_InstallGetProgress(mcpHandle, (MCPInstallProgress*)mcpInstallInfo);
@@ -467,21 +542,47 @@ void InstallWindow::InstallProcess(int pos, int total)
 						u64 installedSize = ((u64)mcpInstallInfo[5] << 32ULL) | mcpInstallInfo[6];
 						int percent = (totalSize != 0) ? ((installedSize * 100.0f) / totalSize) : 0;
 						
-						std::string message = fmt("%0.1f / %0.1f MB (%i", installedSize / (1024.0f * 1024.0f), totalSize / (1024.0f * 1024.0f), percent);
+						std::string message = strfmt("%0.1f / %0.1f MB (%i", installedSize / (1024.0f * 1024.0f), totalSize / (1024.0f * 1024.0f), percent);
 						message += "%)";
 						
 						messageBox->setProgress(percent);
 						messageBox->setProgressBarInfo(message);
+
+						// Arm the stall timer on the first record, re-arm
+						// when bytes actually move. 0 bytes seen is not
+						// treated as progress.
+						if(!sawRecord || installedSize != lastSeenBytes)
+						{
+							sawRecord = true;
+							lastSeenBytes = installedSize;
+							stallStart = OSGetTime();
+						}
+					}
+
+					bool stalled = sawRecord &&
+					                 (OSTicksToMilliseconds(OSGetTime() - stallStart) > 300000);
+					bool noRecord = !sawRecord &&
+					                (OSTicksToMilliseconds(OSGetTime() - loopStart) > 1800000);
+					if(stalled || noRecord)
+					{
+						messageBox->reload("Install failed", gameName,
+						                   stalled ? "The install made no progress for 5 minutes."
+						                           : "The install never reported progress.",
+						                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						result = -10;
+						abandonedInstall = true;
+						installGen.fetch_add(1); // drop the still-pending callback
+						break;
 					}
 					
 					usleep(50000);
 				}
 				
-				if(installError != 0)
+				if(!abandonedInstall && installError != 0)
 				{
 					if ((installError == 0xFFFCFFE9) && (effTarget == USB))
 					{
-						messageBox->reload("Install failed", gameName, fmt("0x%08X access failed (no USB storage attached?)", installError), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						messageBox->reload("Install failed", gameName, strfmt("0x%08X access failed (no USB storage attached?)", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						result = -8;
 					}
 					else
@@ -497,6 +598,8 @@ void InstallWindow::InstallProcess(int pos, int total)
 							messageBox->reload("Install failed", gameName, "Possible bad SD card.  Reformat (32k blocks) or replace", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if ((installError & 0xFFFF0000) == 0xFFFB0000)
 							messageBox->reload("Install failed", gameName, "Verify WUP files are correct & complete. DLC/E-shop require Sig Patch", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						else
+							messageBox->reload("Install failed", gameName, strfmt("Install failed with error code 0x%08X", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						
 						result = -9;
 					}
@@ -533,13 +636,27 @@ void InstallWindow::InstallProcess(int pos, int total)
 		}
 		while(0);
 		
-		MCP_Close(mcpHandle);
-		if(mcpPathInfoVector)
-			OSFreeToSystem(mcpPathInfoVector);
-		if(mcpInstallPath)
-			OSFreeToSystem(mcpInstallPath);
-		if(mcpInstallInfo)
-			OSFreeToSystem(mcpInstallInfo);
+		if(!abandonedInstall)
+		{
+			MCP_Close(mcpHandle);
+			if(mcpPathInfoVector)
+				OSFreeToSystem(mcpPathInfoVector);
+			if(mcpInstallPath)
+				OSFreeToSystem(mcpInstallPath);
+			if(mcpInstallInfo)
+				OSFreeToSystem(mcpInstallInfo);
+		}
+		else
+		{
+			// IOS maps the ioctlv buffers and the info block for the whole
+			// lifetime of the async request and releases them when its
+			// callback fires; freeing them (or closing the handle) now
+			// would hand IOS freed memory. The chain stops right here (the
+			// failure tail sets canceled), so leaking these few hundred
+			// bytes is bounded - and the generation bump above ensures the
+			// late callback cannot publish into the next install's flags.
+			log_printf("InstallWindow: abandoned install still in flight; buffers and MCP handle deliberately kept");
+		}
 	}
 	/////////////////////////////
 	

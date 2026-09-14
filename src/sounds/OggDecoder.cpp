@@ -25,6 +25,7 @@
  ***************************************************************************/
 #include <unistd.h>
 #include <malloc.h>
+#include "utils/logger.h"
 #include "OggDecoder.hpp"
 
 static int ogg_read(void * punt, int bytes, int blocks, int *f)
@@ -80,8 +81,15 @@ OggDecoder::OggDecoder(const u8 * snd, int len)
 OggDecoder::~OggDecoder()
 {
 	ExitRequested = true;
-	while(Decoding)
+	//! capped handoff so teardown cannot hang on a stuck decode loop
+	int waitCount = 0;
+	while(Decoding && waitCount < 2000)
+	{
 		usleep(100);
+		waitCount++;
+	}
+	if(Decoding)
+		log_printf("OggDecoder: timed out waiting for decode to finish\n");
 
 	if(file_fd)
 		ov_clear(&ogg_file);
@@ -105,7 +113,7 @@ void OggDecoder::OpenFile()
 		return;
 	}
 
-	Format = ((ogg_info->channels == 2) ? (FORMAT_PCM_16_BIT | CHANNELS_STEREO) : (FORMAT_PCM_16_BIT | CHANNELS_MONO));
+	Format = ((ogg_info->channels == 2) ? (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT) : (u16)((u16)CHANNELS_MONO | (u16)FORMAT_PCM_16_BIT));
 	SampleRate = ogg_info->rate;
 }
 

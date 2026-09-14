@@ -79,7 +79,12 @@ std::string humanSize(U64 bytes) {
 
 // Read a whole file into `out`, in 64 KB chunks. Used only for small files (the 16-byte game.key);
 // the multi-GB .wux is streamed separately by WuxContainer, never read whole.
-Error readWhole(const char* path, std::vector<U8>& out) {
+// maxBytes caps the accepted size (0 = unlimited): a larger file is rejected
+// with Error::Truncated and, when tooLarge is given, reported through it so
+// the caller can name the reason.
+Error readWhole(const char* path, std::vector<U8>& out,
+                U64 maxBytes = 0,
+                bool* tooLarge = nullptr) {
     int fd = ::open(path, O_RDONLY);
     if (fd < 0) return Error::IoError;
     out.clear();
@@ -89,6 +94,12 @@ Error readWhole(const char* path, std::vector<U8>& out) {
         ssize_t n = ::read(fd, buf.data(), buf.size());
         if (n < 0) { ::close(fd); return Error::IoError; }
         if (n == 0) break;
+        if (maxBytes != 0 && (U64)out.size() + (U64)n > maxBytes) {
+            ::close(fd);
+            out.clear();
+            if (tooLarge) *tooLarge = true;
+            return Error::Truncated;
+        }
         out.insert(out.end(), buf.data(), buf.data() + n);
     }
     ::close(fd);
@@ -105,10 +116,16 @@ int hexVal(U8 c) {
 
 // Read a key file into a 16-byte key. Accepts either 16 raw bytes, or a
 // 32-char ASCII hex string. ASCII whitespace is ignored. On success key holds exactly 16 bytes.
-Error parseKeyFile(const char* path, std::vector<U8>& key) {
+// reason (optional) gets a human-readable hint when the file is over-sized.
+Error parseKeyFile(const char* path, std::vector<U8>& key,
+                   std::string* reason = nullptr) {
     std::vector<U8> raw;
-    Error e = readWhole(path, raw);
-    if (e != Error::Ok) return e;
+    bool tooLarge = false;
+    Error e = readWhole(path, raw, 4096, &tooLarge);
+    if (e != Error::Ok) {
+        if (tooLarge && reason) *reason = "file too large";
+        return e;
+    }
     std::vector<U8> clean;
     for (size_t i = 0; i < raw.size(); ++i) {
         U8 b = raw[i];
@@ -147,7 +164,8 @@ bool nameStartsWith(const char* a, const std::string& prefix) {
     return true;
 }
 
-// Write bytes to a file (creates or truncates).
+// Write bytes to a file (creates or truncates). A failed write or close leaves
+// no partial file behind (best-effort unlink).
 Error writeWhole(const char* path, const U8* data, size_t len) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return Error::IoError;
@@ -155,11 +173,11 @@ Error writeWhole(const char* path, const U8* data, size_t len) {
     const U8* p = data;
     while (left > 0) {
         ssize_t n = ::write(fd, p, left);
-        if (n <= 0) { ::close(fd); return Error::IoError; }
+        if (n <= 0) { ::close(fd); ::unlink(path); return Error::IoError; }
         p += (size_t)n;
         left -= (size_t)n;
     }
-    ::close(fd);
+    if (::close(fd) != 0) { ::unlink(path); return Error::IoError; }
     return Error::Ok;
 }
 
@@ -198,12 +216,12 @@ Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
         U64 chunk = size - done;
         if (chunk > buf.size()) chunk = buf.size();
         Error e = c.read(offset + done, (size_t)chunk, buf.data());
-        if (e != Error::Ok) { ::close(fd); return e; }
+        if (e != Error::Ok) { ::close(fd); ::unlink(path); return e; }
         const U8* p = buf.data();
         size_t left = (size_t)chunk;
         while (left > 0) {
             ssize_t n = ::write(fd, p, left);
-            if (n <= 0) { ::close(fd); return Error::IoError; }
+            if (n <= 0) { ::close(fd); ::unlink(path); return Error::IoError; }
             p += (size_t)n;
             left -= (size_t)n;
         }
@@ -214,11 +232,11 @@ Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
                    wp->doneBytes, wp->totalBytes, wp->user);
         }
     }
-    ::close(fd);
+    if (::close(fd) != 0) { ::unlink(path); return Error::IoError; }
     return Error::Ok;
 }
 
-// Read + decrypt a partition's FST into out. 
+// Read + decrypt a partition's FST into out.
 // full 64 KiB chunks are read from the disc and each chunk is AES-CBC decrypted with a
 // zero IV (the on-disc FST is encrypted per 64 KiB chunk), so any FST size
 // works, not just multiples of 16. Fst::parse verifies the "FST" signature.
@@ -236,11 +254,16 @@ Error readFst(const WuxContainer& c, U64 fstOffset, U32 fstSize,
 
     U64 done = 0;
     while (done < (U64)fstSize) {
-        Error e = c.read(fstOffset + done, chunk, raw.data());
+        const U64 left = (U64)fstSize - done;
+        // Only the final iteration is short; round it up to a whole AES block so
+        // nothing past the FST data is read or decrypted. Each chunk keeps its
+        // own zero IV, so a shorter tail decrypts identically.
+        const U64 want = (left < (U64)chunk) ? ((left + 15) & ~(U64)15) : (U64)chunk;
+        Error e = c.read(fstOffset + done, (size_t)want, raw.data());
         if (e != Error::Ok) return e;
-        e = aesCbcDecrypt(key, iv, raw.data(), chunk, dec.data());
+        e = aesCbcDecrypt(key, iv, raw.data(), (size_t)want, dec.data());
         if (e != Error::Ok) return e;
-        size_t n = (size_t)(((U64)chunk < (U64)fstSize - done) ? chunk : ((U64)fstSize - done));
+        const size_t n = (size_t)(left < want ? left : want);
         std::memcpy(out.data() + done, dec.data(), n);
         done += n;
     }
@@ -327,13 +350,19 @@ Error getFstFile(const Fst& fst, const WuxContainer& c,
         U8 iv[16];
         makeOffsetIv(pos, iv);   // IV = (pos >> 16) == blockIndex for block-aligned pos
 
-        Error e = c.read(readOffset, (size_t)BLOCK, raw.data());
-        if (e != Error::Ok) return e;
-        e = aesCbcDecrypt(key, iv, raw.data(), (size_t)BLOCK, dec.data());
-        if (e != Error::Ok) return e;
-
+        // Decryption still starts at the block boundary (the IV belongs to the
+        // block), but the bytes past this file's portion are not needed: read
+        // and decrypt only align16(blockOffset + n), never a full block at the
+        // end of the data.
         U64 n = remaining;
         if (n > BLOCK - blockOffset) n = BLOCK - blockOffset;
+        const U64 want = (blockOffset + n + 15) & ~(U64)15;
+
+        Error e = c.read(readOffset, (size_t)want, raw.data());
+        if (e != Error::Ok) return e;
+        e = aesCbcDecrypt(key, iv, raw.data(), (size_t)want, dec.data());
+        if (e != Error::Ok) return e;
+
         std::memcpy(out.data() + (fileSize - remaining), dec.data() + blockOffset, (size_t)n);
 
         remaining -= n;
@@ -366,407 +395,485 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                             const char* commonKeyPath, const char* outRoot,
                             ExtractResult& result,
                             ProgressFn progress, void* progressUser) {
-    result = ExtractResult();
+    try {
+        result = ExtractResult();
 
-    // 1. Open the .wux container.
-    WuxContainer container;
-    Error e = container.open(wuxPath);
-    if (e != Error::Ok) {
-        result.error = std::string("open .wux: ") + errorName(e);
-        return e;
-    }
-
-    // 2. Load the 16-byte title/disc key (16 raw bytes, or a 32-char hex string).
-    std::vector<U8> key;
-    e = parseKeyFile(keyPath, key);
-    if (e != Error::Ok) {
-        result.error = std::string("read game.key: ") + errorName(e) +
-                       " (must be 16 raw bytes or a 32-char hex string)";
-        return e;
-    }
-
-    // 2b. Load the 16-byte console common key. Each GM title's NUS content key
-    //     is derived from its ticket plus this key; that content key decrypts
-    //     the GM FST (NUS content 0). The common key is console-specific and
-    //     user-supplied, never distributed or hardcoded.
-    std::vector<U8> commonKey;
-    e = parseKeyFile(commonKeyPath, commonKey);
-    if (e != Error::Ok) {
-        result.error = std::string("read common.key: ") + errorName(e) +
-                       " (must be 16 raw bytes or a 32-char hex string)";
-        return e;
-    }
-
-    // 3. Decrypt + parse the partition TOC.
-    WudToc toc;
-    std::vector<TocPartition> partitions;
-    e = toc.load(container, key.data(), partitions);
-    if (e != Error::Ok) {
-        result.error = std::string("TOC: ") + errorName(e);
-        return e;
-    }
-
-    // 4. Locate the SI (system) partition.
-    const TocPartition* si = nullptr;
-    for (size_t i = 0; i < partitions.size(); ++i) {
-        if (partitions[i].name[0] == 'S' && partitions[i].name[1] == 'I') {
-            si = &partitions[i];
-            break;
-        }
-    }
-    if (!si) {
-        result.error = "SI partition not found";
-        return Error::NotFound;
-    }
-
-    // 5. SI partition header + FST.
-    U8 siHeader[0x20];
-    e = readPartitionHeader(container, si->offset, siHeader);
-    if (e != Error::Ok) {
-        result.error = std::string("SI header: ") + errorName(e);
-        return e;
-    }
-    U32 siBlockSize = readU32BE(siHeader + 0x04);
-    if (siBlockSize == 0) siBlockSize = fmt::kSectorSize;
-    U32 siFstSize = readU32BE(siHeader + 0x14);
-    std::vector<U8> siFstBytes;
-    e = readFst(container, fstOffset(siHeader, si->offset), siFstSize,
-                key.data(), siFstBytes);
-    if (e != Error::Ok) {
-        result.error = std::string("SI FST: ") + errorName(e);
-        return e;
-    }
-    Fst siFst;
-    e = siFst.parse(siFstBytes.data(), siFstBytes.size());
-    if (e != Error::Ok) {
-        result.error = std::string("SI FST parse: ") + errorName(e);
-        return e;
-    }
-
-    // 6. Per-title folders in the SI partition (title.tmd/.tik/.cert live
-    //    here); a disc can hold several titles.
-    std::vector<const FstEntry*> titleDirs = siFst.rootDirChildren();
-    if (titleDirs.empty()) {
-        result.error = "no title folders in SI FST";
-        return Error::NotFound;
-    }
-
-    // Pass 1: read + parse the metadata of every title.
-    std::vector<TitleData> titles(titleDirs.size());
-    for (size_t t = 0; t < titleDirs.size(); ++t) {
-        TitleData& td = titles[t];
-        td.dir = titleDirs[t];
-        td.outDir = std::string(outRoot) + "/" + td.dir->name;
-        auto fail = [&td](Error err, const std::string& msg) {
-            td.error = true;
-            td.code = err;
-            td.errorText = msg;
-        };
-
-        // 6a. TIK / TMD / CERT for this title (decrypted).
-        e = getFstFile(siFst, container, si->offset, siBlockSize,
-                       td.dir->path + "/title.tik", key.data(), td.tik);
-        if (e != Error::Ok) { fail(e, "title.tik: " + std::string(errorName(e))); continue; }
-
-        // 6a2. Derive this title's NUS content key from the ticket + common key.
-        // The GM FST (NUS content 0) is encrypted with this key.
-        {
-            U8 ck[16];
-            e = deriveContentKey(commonKey.data(), td.tik.data(),
-                                 td.tik.size(), ck);
-            if (e != Error::Ok) {
-                fail(e, "content key: " + std::string(errorName(e)));
-                continue;
-            }
-            td.contentKey.assign(ck, ck + 16);
+        // 1. Open the .wux container.
+        WuxContainer container;
+        Error e = container.open(wuxPath);
+        if (e != Error::Ok) {
+            result.error = std::string("open .wux: ") + errorName(e);
+            return e;
         }
 
-        e = getFstFile(siFst, container, si->offset, siBlockSize,
-                       td.dir->path + "/title.tmd", key.data(), td.tmdBytes);
-        if (e != Error::Ok) { fail(e, "title.tmd: " + std::string(errorName(e))); continue; }
-        e = getFstFile(siFst, container, si->offset, siBlockSize,
-                       td.dir->path + "/title.cert", key.data(), td.cert);
-        if (e != Error::Ok) { fail(e, "title.cert: " + std::string(errorName(e))); continue; }
+        // 2. Load the 16-byte title/disc key (16 raw bytes, or a 32-char hex string).
+        std::vector<U8> key;
+        std::string keyWhy;
+        e = parseKeyFile(keyPath, key, &keyWhy);
+        if (e != Error::Ok) {
+            result.error = std::string("read game.key: ") +
+                           (keyWhy.empty() ? std::string(errorName(e)) : keyWhy) +
+                           " (must be 16 raw bytes or a 32-char hex string)";
+            return e;
+        }
 
-        // 6b. Parse the TMD.
-        e = parseTmd(td.tmdBytes.data(), td.tmdBytes.size(), td.tmd);
-        if (e != Error::Ok) { fail(e, "TMD: " + std::string(errorName(e))); continue; }
-        // Name the output folder by the TMD title ID (16 uppercase hex digits).
-        td.outDir = std::string(outRoot) + "/" + titleIdHex(td.tmd.titleID);
+        // 2b. Load the 16-byte console common key. Each GM title's NUS content key
+        //     is derived from its ticket plus this key; that content key decrypts
+        //     the GM FST (NUS content 0). The common key is console-specific and
+        //     user-supplied, never distributed or hardcoded.
+        std::vector<U8> commonKey;
+        std::string commonWhy;
+        e = parseKeyFile(commonKeyPath, commonKey, &commonWhy);
+        if (e != Error::Ok) {
+            result.error = std::string("read common.key: ") +
+                           (commonWhy.empty() ? std::string(errorName(e)) : commonWhy) +
+                           " (must be 16 raw bytes or a 32-char hex string)";
+            return e;
+        }
 
-        // 6c. Match the GM partition: name = "GM" + the ticket's title ID
-        // (compared case-insensitively, since the on-disc casing can vary).
-        std::string gmName = "GM";
-        if (td.tik.size() >= 0x1DC + 8)
-            gmName += hexUpper(readU64BE(td.tik.data() + 0x1DC), 16);
-        const TocPartition* gm = nullptr;
+        // 3. Decrypt + parse the partition TOC.
+        WudToc toc;
+        std::vector<TocPartition> partitions;
+        e = toc.load(container, key.data(), partitions);
+        if (e != Error::Ok) {
+            result.error = std::string("TOC: ") + errorName(e);
+            return e;
+        }
+
+        // 4. Locate the SI (system) partition.
+        const TocPartition* si = nullptr;
         for (size_t i = 0; i < partitions.size(); ++i) {
-            if (nameStartsWith(partitions[i].name, gmName)) { gm = &partitions[i]; break; }
-        }
-        if (!gm) { fail(Error::NotFound, "GM partition not found: " + gmName); continue; }
-        td.gm = gm;
-
-        // 6d. GM header (raw, for the h3 region) + GM FST.
-        e = readPartitionHeader(container, gm->offset, td.gmHeader);
-        if (e != Error::Ok) { fail(e, "GM header: " + std::string(errorName(e))); continue; }
-        td.gmBlockSize = readU32BE(td.gmHeader + 0x04);
-        if (td.gmBlockSize == 0) td.gmBlockSize = fmt::kSectorSize;
-
-        U32 gmH3ListSize = readU32BE(td.gmHeader + 0x0C);
-        if (gmH3ListSize > kMaxH3ListSize) {
-            fail(Error::Truncated, "GM h3 list size too large");
-            continue;
-        }
-        if (gmH3ListSize > 0) {
-            td.gmH3Region.resize(gmH3ListSize);
-            e = container.read(gm->offset + 0x40, gmH3ListSize, td.gmH3Region.data());
-            if (e != Error::Ok) {
-                fail(e, "GM h3 region: " + std::string(errorName(e)));
-                continue;
-            }
-        }
-
-        // The GM FST is NUS content 0: its size is align16(TMD content 0), and
-        // it is a single continuous CBC stream. It is encrypted with this
-        // title's CONTENT key (derived from the ticket + common key), not with
-        // the disc key. If the TMD has no content 0, fall back to the
-        // volume-header FSTSize.
-        U64 gmFstSize = 0;
-        for (size_t i = 0; i < td.tmd.contents.size(); ++i)
-            if (td.tmd.contents[i].index == 0) {
-                gmFstSize = (td.tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
+            if (partitions[i].name[0] == 'S' && partitions[i].name[1] == 'I') {
+                si = &partitions[i];
                 break;
             }
-        if (gmFstSize == 0) gmFstSize = readU32BE(td.gmHeader + 0x14);
-        if (gmFstSize > 0) {
-            std::vector<U8> gmFstBytes;
-            e = readFstChained(container, fstOffset(td.gmHeader, gm->offset),
-                               (U32)gmFstSize, td.contentKey.data(), gmFstBytes);
-            if (e != Error::Ok) { fail(e, "GM FST: " + std::string(errorName(e))); continue; }
-            e = td.gmFst.parse(gmFstBytes.data(), gmFstBytes.size());
-            if (e != Error::Ok) { fail(e, "GM FST parse: " + std::string(errorName(e))); continue; }
-            td.hasGmFst = true;
         }
-        if (td.tmd.contentCount > 1 && !td.hasGmFst &&
-            td.tmd.contents.size() > 1) {
-            fail(Error::Truncated, "GM FST missing but the TMD has content beyond index 0");
-            continue;
+        if (!si) {
+            result.error = "SI partition not found";
+            return Error::NotFound;
         }
-    }
 
-    // Count the good titles; if none, report the first error.
-    int goodTitles = 0;
-    for (size_t t = 0; t < titles.size(); ++t)
-        if (!titles[t].error) ++goodTitles;
-    if (goodTitles == 0) {
-        const TitleData& first = titles[0];
-        result.error = std::string(titles[0].dir->name) + ": " +
-                       (first.errorText.empty() ? std::string(errorName(first.code))
-                                                : first.errorText);
-        return first.code;
-    }
-
-    // Create the install root (e.g. /install) first: mkdir does not create
-    // intermediate directories.
-    Error dirErr = ensureDir(outRoot);
-    if (dirErr != Error::Ok) {
-        result.error = std::string("create ") + outRoot + ": " + errorName(dirErr);
-        return dirErr;
-    }
-
-    // Pass 2: stream the content of every good title.
-    int totalContents = 0;
-    U64 totalAppBytes = 0;
-    for (size_t t = 0; t < titles.size(); ++t) {
-        if (titles[t].error) continue;
-        totalContents += (int)titles[t].tmd.contents.size();
-        for (size_t i = 0; i < titles[t].tmd.contents.size(); ++i) {
-            // Same align16 rule as the .app size below.
-            U64 s = (titles[t].tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
-            if (s == 0) s = titles[t].tmd.contents[i].encryptedFileSize;
-            totalAppBytes += s;
+        // 5. SI partition header + FST.
+        U8 siHeader[0x20];
+        e = readPartitionHeader(container, si->offset, siHeader);
+        if (e != Error::Ok) {
+            result.error = std::string("SI header: ") + errorName(e);
+            return e;
         }
-    }
+        U32 siBlockSize = readU32BE(siHeader + 0x04);
+        if (siBlockSize == 0) siBlockSize = fmt::kSectorSize;
+        U32 siFstSize = readU32BE(siHeader + 0x14);
+        std::vector<U8> siFstBytes;
+        e = readFst(container, fstOffset(siHeader, si->offset), siFstSize,
+                    key.data(), siFstBytes);
+        if (e != Error::Ok) {
+            result.error = std::string("SI FST: ") + errorName(e);
+            return e;
+        }
+        Fst siFst;
+        e = siFst.parse(siFstBytes.data(), siFstBytes.size());
+        if (e != Error::Ok) {
+            result.error = std::string("SI FST parse: ") + errorName(e);
+            return e;
+        }
+        // Corrupt deep nesting drops the affected subtree but still returns
+        // Ok; the pipeline only needs the title dirs and their files, so the
+        // truncation is recorded for the final note instead of failing.
+        const bool siDepthTruncated = siFst.depthTruncated;
 
-    // Size sanity before the space guard: on a real disc every content
-    // region sits disjointly inside the image, so the summed align16 sizes
-    // cannot exceed the image size (each file pads up by at most 15 bytes).
-    // A corrupt TMD claiming absurd sizes gets the right diagnosis here
-    // instead of a misleading "not enough free space", and needBytes below
-    // can never wrap.
-    if (totalAppBytes > container.uncompressedSize() +
-                        (U64)totalContents * 15) {
-        result.error = "content sizes exceed the image size (corrupt .wux)";
-        return Error::Truncated;
-    }
+        // 6. Per-title folders in the SI partition (title.tmd/.tik/.cert live
+        //    here); a disc can hold several titles.
+        std::vector<const FstEntry*> titleDirs = siFst.rootDirChildren();
+        if (titleDirs.empty()) {
+            result.error = "no title folders in SI FST";
+            return Error::NotFound;
+        }
+        // The pass-1 vector below is sized from this list, so it needs a
+        // hard bound (64 is far above any real disc: retail discs carry a
+        // handful at most). A corrupt FST claiming more is truncated to the
+        // first 64 entries and the note says so - the installable titles
+        // still extract.
+        bool titlesTruncated = false;
+        if (titleDirs.size() > 64) {
+            titleDirs.resize(64);
+            titlesTruncated = true;
+        }
 
-    // Free-space guard, before anything is written: the .app payload plus
-    // the metadata files must fit on the volume holding outRoot. The
-    // metadata cost is known exactly here (the .tmd/.tik/.cert buffers are
-    // in memory and the .h3 bytes are cut out of gmH3Region, so the region
-    // size is an upper bound for them), plus a flat slack for filesystem
-    // overhead. statvfs uses the same POSIX layer as the rest of this
-    // module; whenever it cannot answer cleanly (call fails, or the field
-    // shape is implausible) the check is SKIPPED, never a false abort - a
-    // real filesystem failure then surfaces as the usual I/O error.
-    U64 metaBytes = 0;
-    for (size_t t = 0; t < titles.size(); ++t) {
-        if (titles[t].error) continue;
-        metaBytes += titles[t].tmdBytes.size() + titles[t].tik.size() +
-                     titles[t].cert.size() + titles[t].gmH3Region.size();
-    }
-    {
-        struct statvfs sv;
-        if (::statvfs(outRoot, &sv) == 0 && sv.f_blocks > 0 &&
-            (U64)sv.f_bavail <= (U64)sv.f_blocks) {
-            // f_bavail counts fragments (f_frsize); stacks that populate
-            // only f_bsize fall back to it before giving up.
-            U64 blk = sv.f_frsize ? (U64)sv.f_frsize : (U64)sv.f_bsize;
-            if (blk > 0) {
-                U64 freeBytes = (U64)sv.f_bavail * blk;
-                U64 needBytes =
-                    totalAppBytes + metaBytes + kSpaceCheckSlackBytes;
-                if (freeBytes < needBytes) {
-                    result.error = "not enough free space on the SD card: need ~" +
-                                   humanSize(needBytes) +
-                                   " for the extracted files, only " +
-                                   humanSize(freeBytes) + " free.";
-                    return Error::NoSpace;
+        // Pass 1: read + parse the metadata of every title.
+        std::vector<TitleData> titles(titleDirs.size());
+        for (size_t t = 0; t < titleDirs.size(); ++t) {
+            TitleData& td = titles[t];
+            td.dir = titleDirs[t];
+            td.outDir = std::string(outRoot) + "/" + td.dir->name;
+            auto fail = [&td](Error err, const std::string& msg) {
+                td.error = true;
+                td.code = err;
+                td.errorText = msg;
+            };
+
+            // 6a. TIK / TMD / CERT for this title (decrypted).
+            e = getFstFile(siFst, container, si->offset, siBlockSize,
+                           td.dir->path + "/title.tik", key.data(), td.tik);
+            if (e != Error::Ok) { fail(e, "title.tik: " + std::string(errorName(e))); continue; }
+
+            // 6a2. Derive this title's NUS content key from the ticket + common key.
+            // The GM FST (NUS content 0) is encrypted with this key.
+            {
+                U8 ck[16];
+                e = deriveContentKey(commonKey.data(), td.tik.data(),
+                                     td.tik.size(), ck);
+                if (e != Error::Ok) {
+                    fail(e, "content key: " + std::string(errorName(e)));
+                    continue;
+                }
+                td.contentKey.assign(ck, ck + 16);
+            }
+
+            e = getFstFile(siFst, container, si->offset, siBlockSize,
+                           td.dir->path + "/title.tmd", key.data(), td.tmdBytes);
+            if (e != Error::Ok) { fail(e, "title.tmd: " + std::string(errorName(e))); continue; }
+            e = getFstFile(siFst, container, si->offset, siBlockSize,
+                           td.dir->path + "/title.cert", key.data(), td.cert);
+            if (e != Error::Ok) { fail(e, "title.cert: " + std::string(errorName(e))); continue; }
+
+            // 6b. Parse the TMD.
+            e = parseTmd(td.tmdBytes.data(), td.tmdBytes.size(), td.tmd);
+            if (e != Error::Ok) { fail(e, "TMD: " + std::string(errorName(e))); continue; }
+            // Name the output folder by the TMD title ID (16 uppercase hex digits).
+            td.outDir = std::string(outRoot) + "/" + titleIdHex(td.tmd.titleID);
+
+            // 6c. Match the GM partition: name = "GM" + the ticket's title ID
+            // (compared case-insensitively, since the on-disc casing can vary).
+            std::string gmName = "GM";
+            if (td.tik.size() >= 0x1DC + 8)
+                gmName += hexUpper(readU64BE(td.tik.data() + 0x1DC), 16);
+            const TocPartition* gm = nullptr;
+            for (size_t i = 0; i < partitions.size(); ++i) {
+                if (nameStartsWith(partitions[i].name, gmName)) { gm = &partitions[i]; break; }
+            }
+            if (!gm) { fail(Error::NotFound, "GM partition not found: " + gmName); continue; }
+            td.gm = gm;
+
+            // 6d. GM header (raw, for the h3 region) + GM FST.
+            e = readPartitionHeader(container, gm->offset, td.gmHeader);
+            if (e != Error::Ok) { fail(e, "GM header: " + std::string(errorName(e))); continue; }
+            td.gmBlockSize = readU32BE(td.gmHeader + 0x04);
+            if (td.gmBlockSize == 0) td.gmBlockSize = fmt::kSectorSize;
+
+            U32 gmH3ListSize = readU32BE(td.gmHeader + 0x0C);
+            if (gmH3ListSize > kMaxH3ListSize) {
+                fail(Error::Truncated, "GM h3 list size too large");
+                continue;
+            }
+            if (gmH3ListSize > 0) {
+                td.gmH3Region.resize(gmH3ListSize);
+                e = container.read(gm->offset + 0x40, gmH3ListSize, td.gmH3Region.data());
+                if (e != Error::Ok) {
+                    fail(e, "GM h3 region: " + std::string(errorName(e)));
+                    continue;
                 }
             }
-        }
-    }
-    int doneContents = 0;
 
-    // Progress state for the writer loop: the callback fires per 32 KB chunk,
-    // doneBytes carries over between content files. The small metadata writes
-    // (.h3/.tmd/.tik/.cert) are not counted: the .app stream is the bulk.
-    WriteProgress wp;
-    wp.fn = progress;
-    wp.user = progressUser;
-    wp.total = totalContents;
-    wp.totalBytes = totalAppBytes;
-
-    for (size_t t = 0; t < titles.size(); ++t) {
-        TitleData& td = titles[t];
-        if (td.error) continue;
-
-        dirErr = ensureDir(td.outDir.c_str());
-        if (dirErr != Error::Ok) {
-            td.error = true;
-            td.code = dirErr;
-            td.errorText = std::string("create ") + td.outDir + ": " + errorName(dirErr);
-            continue;
-        }
-
-        int total = (int)td.tmd.contents.size();
-        for (int i = 0; i < total; ++i) {
-            const TmdContent& c = td.tmd.contents[i];
-
-            U64 contentOffset;
-            if (c.index == 0) {
-                // content 0 (the FST) sits at FSTAddress * blockSize.
-                contentOffset = td.gm->offset + (U64)readU32BE(td.gmHeader + 0x18) *
-                                td.gmBlockSize;
-            } else {
-                const FstSection* sec = td.hasGmFst ? td.gmFst.section(c.index)
-                                                     : nullptr;
-                if (!sec) {
-                    td.error = true;
-                    td.code = Error::NotFound;
-                    td.errorText = "content index out of range: " + std::to_string(c.index);
+            // The GM FST is NUS content 0: its size is align16(TMD content 0), and
+            // it is a single continuous CBC stream. It is encrypted with this
+            // title's CONTENT key (derived from the ticket + common key), not with
+            // the disc key. If the TMD has no content 0, fall back to the
+            // volume-header FSTSize.
+            U64 gmFstSize = 0;
+            for (size_t i = 0; i < td.tmd.contents.size(); ++i)
+                if (td.tmd.contents[i].index == 0) {
+                    gmFstSize = (td.tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
                     break;
                 }
-                contentOffset = td.gm->offset + (U64)sec->address * td.gmBlockSize;
+            if (gmFstSize == 0) gmFstSize = readU32BE(td.gmHeader + 0x14);
+            if (gmFstSize > (U64)kMaxFstSize) {
+                fail(Error::Truncated, "GM FST size invalid");
+                continue;
             }
-            U64 appSize = (c.encryptedFileSize + 15) & ~(U64)15;  // align16
-            if (appSize == 0) appSize = c.encryptedFileSize;
-            if (contentOffset + appSize > container.uncompressedSize()) {
-                td.error = true;
-                td.code = Error::Truncated;
-                td.errorText = "content runs past end of image: " + std::to_string(c.id);
-                break;
+            if (gmFstSize > 0) {
+                std::vector<U8> gmFstBytes;
+                e = readFstChained(container, fstOffset(td.gmHeader, gm->offset),
+                                   (U32)gmFstSize, td.contentKey.data(), gmFstBytes);
+                if (e != Error::Ok) { fail(e, "GM FST: " + std::string(errorName(e))); continue; }
+                e = td.gmFst.parse(gmFstBytes.data(), gmFstBytes.size());
+                if (e != Error::Ok) { fail(e, "GM FST parse: " + std::string(errorName(e))); continue; }
+                td.hasGmFst = true;
             }
+            if (td.tmd.contentCount > 1 && !td.hasGmFst &&
+                td.tmd.contents.size() > 1) {
+                fail(Error::Truncated, "GM FST missing but the TMD has content beyond index 0");
+                continue;
+            }
+        }
 
-            std::string id8 = hexUpper(c.id, 8);
-            // doneContents already counts the earlier files of this title
-            // (it is incremented after every write), so the file being
-            // written now is simply the (done + 1)th file overall.
-            wp.cur = doneContents + 1;
-            wp.contentId = c.id;
-            e = streamToFile(container, contentOffset, appSize,
-                             (td.outDir + "/" + id8 + ".app").c_str(), &wp);
-            if (e != Error::Ok) {
-                td.error = true;
-                td.code = e;
-                td.errorText = std::string("write .app: ") + errorName(e);
-                break;
-            }
+        // Count the good titles; if none, report the first error.
+        int goodTitles = 0;
+        for (size_t t = 0; t < titles.size(); ++t)
+            if (!titles[t].error) ++goodTitles;
+        if (goodTitles == 0) {
+            const TitleData& first = titles[0];
+            result.error = std::string(titles[0].dir->name) + ": " +
+                           (first.errorText.empty() ? std::string(errorName(first.code))
+                                                    : first.errorText);
+            return first.code;
+        }
 
-            if (c.hashed) {
-                std::vector<U8> h3;
-                Error h3e = extractH3(td.gmHeader, td.gmH3Region.data(),
-                                      td.gmH3Region.size(), c.index, h3);
-                if (h3e == Error::Ok) {
-                    e = writeWhole((td.outDir + "/" + id8 + ".h3").c_str(),
-                                   h3.data(), h3.size());
-                    if (e != Error::Ok) {
-                        td.error = true;
-                        td.code = e;
-                        td.errorText = std::string("write .h3: ") + errorName(e);
-                        break;
+        // Create the install root (e.g. /install) first: mkdir does not create
+        // intermediate directories.
+        Error dirErr = ensureDir(outRoot);
+        if (dirErr != Error::Ok) {
+            result.error = std::string("create ") + outRoot + ": " + errorName(dirErr);
+            return dirErr;
+        }
+
+        // Pass 2: stream the content of every good title.
+        int totalContents = 0;
+        U64 totalAppBytes = 0;
+        for (size_t t = 0; t < titles.size(); ++t) {
+            if (titles[t].error) continue;
+            totalContents += (int)titles[t].tmd.contents.size();
+            for (size_t i = 0; i < titles[t].tmd.contents.size(); ++i) {
+                // Same align16 rule as the .app size below.
+                U64 s = (titles[t].tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
+                if (s == 0) s = titles[t].tmd.contents[i].encryptedFileSize;
+                totalAppBytes += s;
+            }
+        }
+
+        // Size sanity before the space guard: on a real disc every content
+        // region sits disjointly inside the image, so the summed align16 sizes
+        // cannot exceed the image size (each file pads up by at most 15 bytes).
+        // A corrupt TMD claiming absurd sizes gets the right diagnosis here
+        // instead of a misleading "not enough free space", and needBytes below
+        // can never wrap.
+        if (totalAppBytes > container.uncompressedSize() +
+                            (U64)totalContents * 15) {
+            result.error = "content sizes exceed the image size (corrupt .wux)";
+            return Error::Truncated;
+        }
+
+        // Free-space guard, before anything is written: the .app payload plus
+        // the metadata files must fit on the volume holding outRoot. The
+        // metadata cost is known exactly here (the .tmd/.tik/.cert buffers are
+        // in memory and the .h3 bytes are cut out of gmH3Region, so the region
+        // size is an upper bound for them), plus a flat slack for filesystem
+        // overhead. statvfs uses the same POSIX layer as the rest of this
+        // module; whenever it cannot answer cleanly (call fails, or the field
+        // shape is implausible) the check is SKIPPED, never a false abort - a
+        // real filesystem failure then surfaces as the usual I/O error.
+        U64 metaBytes = 0;
+        for (size_t t = 0; t < titles.size(); ++t) {
+            if (titles[t].error) continue;
+            metaBytes += titles[t].tmdBytes.size() + titles[t].tik.size() +
+                         titles[t].cert.size() + titles[t].gmH3Region.size();
+        }
+        {
+            struct statvfs sv;
+            if (::statvfs(outRoot, &sv) == 0 && sv.f_blocks > 0 &&
+                (U64)sv.f_bavail <= (U64)sv.f_blocks) {
+                // f_bavail counts fragments (f_frsize); stacks that populate
+                // only f_bsize fall back to it before giving up.
+                U64 blk = sv.f_frsize ? (U64)sv.f_frsize : (U64)sv.f_bsize;
+                if (blk > 0) {
+                    U64 freeBytes = (U64)sv.f_bavail * blk;
+                    U64 needBytes =
+                        totalAppBytes + metaBytes + kSpaceCheckSlackBytes;
+                    if (freeBytes < needBytes) {
+                        result.error = "not enough free space on the SD card: need ~" +
+                                       humanSize(needBytes) +
+                                       " for the extracted files, only " +
+                                       humanSize(freeBytes) + " free.";
+                        return Error::NoSpace;
                     }
                 }
             }
+        }
+        int doneContents = 0;
 
-            doneContents++;
-        }
-        if (td.error) continue;
+        // Progress state for the writer loop: the callback fires per 32 KB chunk,
+        // doneBytes carries over between content files. The small metadata writes
+        // (.h3/.tmd/.tik/.cert) are not counted: the .app stream is the bulk.
+        WriteProgress wp;
+        wp.fn = progress;
+        wp.user = progressUser;
+        wp.total = totalContents;
+        wp.totalBytes = totalAppBytes;
 
-        // 9. Decrypted metadata.
-        e = writeWhole((td.outDir + "/title.tmd").c_str(), td.tmdBytes.data(), td.tmdBytes.size());
-        if (e != Error::Ok) {
-            td.error = true; td.code = e;
-            td.errorText = std::string("write title.tmd: ") + errorName(e);
-            continue;
-        }
-        e = writeWhole((td.outDir + "/title.tik").c_str(), td.tik.data(), td.tik.size());
-        if (e != Error::Ok) {
-            td.error = true; td.code = e;
-            td.errorText = std::string("write title.tik: ") + errorName(e);
-            continue;
-        }
-        e = writeWhole((td.outDir + "/title.cert").c_str(), td.cert.data(), td.cert.size());
-        if (e != Error::Ok) {
-            td.error = true; td.code = e;
-            td.errorText = std::string("write title.cert: ") + errorName(e);
-            continue;
-        }
+        // Non-fatal accounting for the caller (ExtractResult::note); both lists are
+        // kept short so the summary stays a single readable line.
+        std::string failedList;
+        std::string h3List;
+        const size_t kNoteListCap = 200;
 
-        if (result.titleID == 0) {
-            result.titleID = td.tmd.titleID;
-            result.outDir = td.outDir;
-        }
-        result.outDirs.push_back(td.outDir);
-        result.titleCount++;
-        result.contentCount += total;
-    }
-
-    if (result.titleCount == 0) {
-        // All titles failed in pass 2 (pass 1 was OK).
         for (size_t t = 0; t < titles.size(); ++t) {
-            const TitleData& td = titles[t];
-            if (td.error) {
-                result.error = std::string(td.dir->name) + ": " + td.errorText;
-                return td.code;
+            TitleData& td = titles[t];
+            if (td.error) continue;
+
+            dirErr = ensureDir(td.outDir.c_str());
+            if (dirErr != Error::Ok) {
+                td.error = true;
+                td.code = dirErr;
+                td.errorText = std::string("create ") + td.outDir + ": " + errorName(dirErr);
+                continue;
+            }
+
+            int total = (int)td.tmd.contents.size();
+            for (int i = 0; i < total; ++i) {
+                const TmdContent& c = td.tmd.contents[i];
+
+                U64 contentOffset;
+                if (c.index == 0) {
+                    // content 0 (the FST) sits at FSTAddress * blockSize.
+                    contentOffset = td.gm->offset + (U64)readU32BE(td.gmHeader + 0x18) *
+                                    td.gmBlockSize;
+                } else {
+                    const FstSection* sec = td.hasGmFst ? td.gmFst.section(c.index)
+                                                         : nullptr;
+                    if (!sec) {
+                        td.error = true;
+                        td.code = Error::NotFound;
+                        td.errorText = "content index out of range: " + std::to_string(c.index);
+                        break;
+                    }
+                    contentOffset = td.gm->offset + (U64)sec->address * td.gmBlockSize;
+                }
+                U64 appSize = (c.encryptedFileSize + 15) & ~(U64)15;  // align16
+                if (appSize == 0) appSize = c.encryptedFileSize;
+                if (contentOffset + appSize > container.uncompressedSize()) {
+                    td.error = true;
+                    td.code = Error::Truncated;
+                    td.errorText = "content runs past end of image: " + std::to_string(c.id);
+                    break;
+                }
+
+                std::string id8 = hexUpper(c.id, 8);
+                // doneContents already counts the earlier files of this title
+                // (it is incremented after every write), so the file being
+                // written now is simply the (done + 1)th file overall.
+                wp.cur = doneContents + 1;
+                wp.contentId = c.id;
+                e = streamToFile(container, contentOffset, appSize,
+                                 (td.outDir + "/" + id8 + ".app").c_str(), &wp);
+                if (e != Error::Ok) {
+                    td.error = true;
+                    td.code = e;
+                    td.errorText = std::string("write .app: ") + errorName(e);
+                    break;
+                }
+
+                if (c.hashed) {
+                    std::vector<U8> h3;
+                    Error h3e = extractH3(td.gmHeader, td.gmH3Region.data(),
+                                          td.gmH3Region.size(), c.index, h3);
+                    if (h3e == Error::Ok) {
+                        e = writeWhole((td.outDir + "/" + id8 + ".h3").c_str(),
+                                       h3.data(), h3.size());
+                        if (e != Error::Ok) {
+                            td.error = true;
+                            td.code = e;
+                            td.errorText = std::string("write .h3: ") + errorName(e);
+                            break;
+                        }
+                    } else if (h3List.size() < kNoteListCap) {
+                        char hb[48];
+                        std::snprintf(hb, sizeof(hb),
+                                      "h3 skipped for content 0x%08X", c.id);
+                        if (!h3List.empty()) h3List += ", ";
+                        h3List += hb;
+                    }
+                }
+
+                doneContents++;
+            }
+            if (td.error) continue;
+
+            // 9. Decrypted metadata.
+            e = writeWhole((td.outDir + "/title.tmd").c_str(), td.tmdBytes.data(), td.tmdBytes.size());
+            if (e != Error::Ok) {
+                td.error = true; td.code = e;
+                td.errorText = std::string("write title.tmd: ") + errorName(e);
+                continue;
+            }
+            e = writeWhole((td.outDir + "/title.tik").c_str(), td.tik.data(), td.tik.size());
+            if (e != Error::Ok) {
+                td.error = true; td.code = e;
+                td.errorText = std::string("write title.tik: ") + errorName(e);
+                continue;
+            }
+            e = writeWhole((td.outDir + "/title.cert").c_str(), td.cert.data(), td.cert.size());
+            if (e != Error::Ok) {
+                td.error = true; td.code = e;
+                td.errorText = std::string("write title.cert: ") + errorName(e);
+                continue;
+            }
+
+            if (result.titleID == 0) {
+                result.titleID = td.tmd.titleID;
+                result.outDir = td.outDir;
+            }
+            result.outDirs.push_back(td.outDir);
+            result.titleCount++;
+            result.contentCount += total;
+        }
+
+        // Titles that ended up skipped (pass 1 or pass 2), named only when at
+        // least one title made it through.
+        if (result.titleCount > 0) {
+            for (size_t t = 0; t < titles.size(); ++t) {
+                if (!titles[t].error) continue;
+                if (!failedList.empty()) failedList += ", ";
+                // Bound per-name cost: a corrupt FST can yield a name up to
+                // the blob length; only the start is useful in this list.
+                failedList += titles[t].dir->name.substr(0, 32);
+                if (failedList.size() > kNoteListCap) break;
             }
         }
-        result.error = "no titles extracted";
-        return Error::Unknown;
-    }
 
-    result.ok = true;
-    return Error::Ok;
+        if (result.titleCount == 0) {
+            // All titles failed in pass 2 (pass 1 was OK).
+            for (size_t t = 0; t < titles.size(); ++t) {
+                const TitleData& td = titles[t];
+                if (td.error) {
+                    result.error = std::string(td.dir->name) + ": " + td.errorText;
+                    return td.code;
+                }
+            }
+            result.error = "no titles extracted";
+            return Error::Unknown;
+        }
+
+        result.ok = true;
+
+        // Non-fatal summary of what was skipped; never changes result.ok.
+        if (!failedList.empty() || !h3List.empty() || siDepthTruncated || titlesTruncated) {
+            if (!failedList.empty()) {
+                char nb[256];
+                int n = std::snprintf(nb, sizeof(nb), "extracted %d of %d titles: %s",
+                                      result.titleCount, (int)titles.size(),
+                                      failedList.c_str());
+                if (n < 0) n = 0;
+                else if (n >= (int)sizeof(nb)) n = (int)sizeof(nb) - 1;
+                result.note.assign(nb, (size_t)n);
+                if (!h3List.empty()) result.note += ", " + h3List;
+            } else if (!h3List.empty()) {
+                result.note = h3List;
+            }
+            if (titlesTruncated) {
+                if (!result.note.empty()) result.note += ", ";
+                result.note += "only the first 64 title folders were processed";
+            }
+            if (siDepthTruncated) {
+                if (!result.note.empty()) result.note += ", ";
+                result.note += "SI FST too deeply nested (truncated)";
+            }
+            if (result.note.size() > 255) result.note.resize(255);
+        }
+        return Error::Ok;
+    } catch (const std::bad_alloc&) {
+        result.ok = false;
+        result.error = "out of memory parsing the disc image";
+        return Error::AllocError;
+    }
 }
 
 } // namespace wux

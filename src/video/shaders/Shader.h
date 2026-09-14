@@ -20,6 +20,7 @@
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 #include "utils/utils.h"
+#include "utils/logger.h"
 
 #include <gx2/draw.h>
 #include <gx2/enum.h>
@@ -30,6 +31,13 @@
 #include <gx2/surface.h>
 #include <gx2/texture.h>
 #include "common/gx2_ext.h"
+
+//! Uniform staging copies exactly the declared components of a glm vector into
+//! one 16-byte constant slot, which only holds while glm leaves its vectors
+//! unpadded. Pinned so a glm or toolchain change that pads them breaks the
+//! build instead of the display.
+static_assert(sizeof(glm::vec2) == 8 && sizeof(glm::vec3) == 12 && sizeof(glm::vec4) == 16,
+              "shader uniform staging assumes unaligned glm vectors");
 
 class Shader
 {
@@ -49,7 +57,10 @@ public:
     {
         switch(primitive)
         {
+            //! unsupported primitive: skip the draw instead of guessing QUADS
             default:
+                log_printf("Shader::draw: unsupported primitive %i\n", (int)primitive);
+                return;
             case GX2_PRIMITIVE_MODE_QUADS:
             {
                 GX2DrawEx(GX2_PRIMITIVE_MODE_QUADS, vtxCount, 0, 1);
@@ -75,7 +86,7 @@ public:
                 GX2DrawEx(GX2_PRIMITIVE_MODE_LINE_STRIP, vtxCount, 0, 1);
                 break;
             }
-            //! TODO: add other primitives later
+            //! extend the switch with further GX2_PRIMITIVE_MODE_* cases as needed
         };
     }
 };

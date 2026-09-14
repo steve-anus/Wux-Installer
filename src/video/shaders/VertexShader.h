@@ -83,6 +83,9 @@ public:
             return;
 
         //! this must be moved into an area where the graphic engine has access to and must be aligned to 0x100
+        if(vertexShader->program)
+            free(vertexShader->program);
+
         vertexShader->size = programSize;
         vertexShader->program = (u8*) memalign(GX2_SHADER_ALIGNMENT, vertexShader->size);
         if(vertexShader->program)
@@ -91,7 +94,9 @@ public:
             GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, vertexShader->program, vertexShader->size);
         }
 
-        memcpy(&vertexShader->regs, regs, regsSize);
+        //! never copy past the register block, whatever the caller measured
+        u32 copySize = (regsSize > sizeof(vertexShader->regs)) ? (u32) sizeof(vertexShader->regs) : regsSize;
+        memcpy(&vertexShader->regs, regs, copySize);
     }
 
     void addUniformVar(const GX2UniformVar & var)
@@ -166,8 +171,17 @@ public:
         return attributesCount;
     }
 
-    static void setUniformReg(u32 location, u32 size, const void * reg) {
-        GX2SetVertexUniformReg(location, size, (uint32_t*)reg);
+    //! GX2 addresses uniforms in 4-byte words and uploads whole 16-byte constant
+    //! slots, so the count is a word count and a multiple of 4. On hardware a
+    //! count that is not a multiple of 4 is dropped silently: no error, no log,
+    //! just geometry drawn with a stale transform. Every uniform in these shaders
+    //! owns one slot, so the count is fixed here rather than repeated per call.
+    static void setUniform4(u32 location, const void * reg) {
+        if((location & 3) != 0) {
+            log_printf("VertexShader::setUniform4: uniform slot %u is not 16-byte aligned\n", location);
+            return;
+        }
+        GX2SetVertexUniformReg(location, 4, reg);
     }
 protected:
     u32 attributesCount;

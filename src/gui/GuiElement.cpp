@@ -16,7 +16,8 @@
  ****************************************************************************/
 #include "GuiElement.h"
 
-//! TODO remove this!
+//! Slide effects travel across the fixed 1280x720 logical canvas this
+//! element framework renders into (TV and DRC both scale from it).
 static int screenwidth = 1280;
 static int screenheight = 720;
 
@@ -81,7 +82,7 @@ f32 GuiElement::getLeft()
 
 	f32 x = pLeft;
 
-    //! TODO: the conversion from int to float and back to int is bad for performance, change that
+
 	if(alignment & ALIGN_CENTER)
 	{
 		x = pLeft + pWidth * 0.5f * pScaleX - width * 0.5f * getScaleX();
@@ -116,7 +117,7 @@ f32 GuiElement::getTop()
 
 	f32 y = pTop;
 
-    //! TODO: the conversion from int to float and back to int is bad for performance, change that
+
 	if(alignment & ALIGN_MIDDLE)
 	{
 		y = pTop + pHeight * 0.5f * pScaleY - height * 0.5f * getScaleY();

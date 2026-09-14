@@ -68,7 +68,10 @@ public:
     void setPixel(int x, int y, const GX2Color & color);
     //!Change ImageColor
     void setImageColor(const GX2Color & c, int idx = -1);
-    //!Change ImageColor
+    //!Keep the base f32 overload visible: a same-named member would
+    //otherwise silently hide it and truncate float sizes to int.
+    using GuiElement::setSize;
+    //!Resize the quad
     void setSize(int w, int h);
 
     void setPrimitiveVertex(s32 prim, const f32 *pos, const f32 *tex, u32 count);

@@ -18,6 +18,7 @@
 #define _MESSAGE_BOX_H_
 
 #include "gui/Gui.h"
+#include "system/CMutex.h"
 	
 class MessageBox : public GuiFrame, public sigslot::has_slots<>
 {
@@ -33,6 +34,10 @@ public:
 	void setMessage2(const std::string & message);
 	void setProgress(f32 percent);
 	void setProgressBarInfo(const std::string & info);
+
+	//!Applies queued cross-thread content (see the staging members below);
+	//!runs on the render thread via the element update chain.
+	virtual void updateEffects();
 	
     sigslot::signal2<GuiElement *, int> messageCancelClicked;
 	sigslot::signal2<GuiElement *, int> messageOkClicked;
@@ -146,6 +151,22 @@ private:
 	std::string newMessage1;
 	std::string newMessage2;
 	std::string newInfo;
+
+	//! Cross-thread staging: the install/extract workers only queue content
+	//! through the setters; updateEffects() applies it on the render thread.
+	//! GuiText mutates glyph buffers and the shared font cache, so it must
+	//! never be touched outside the render thread.
+	CMutex crossThreadMutex;
+	bool pendingTitle;
+	bool pendingMessage1;
+	bool pendingMessage2;
+	bool pendingInfo;
+	bool pendingProgress;
+	std::string pendingTitleText;
+	std::string pendingMessage1Text;
+	std::string pendingMessage2Text;
+	std::string pendingInfoText;
+	f32 pendingProgressVal;
 	
 	GuiFrame progressFrame;
 };

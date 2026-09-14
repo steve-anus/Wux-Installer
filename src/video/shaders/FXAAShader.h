@@ -52,7 +52,10 @@ public:
 
     void setResolution(const glm::vec2 & vec)
     {
-        PixelShader::setUniformReg(resolutionLocation, 4, &vec[0]);
+        //! one 16-byte constant slot (resolution@0, declared FLOAT2); the tail is
+        //! never read, see unf_resolution in FXAAShader.cpp
+        const float regs[4] = { vec.x, vec.y, 0.0f, 0.0f };
+        PixelShader::setUniform4(resolutionLocation, regs);
     }
 
     void setTextureAndSampler(const GX2Texture *texture, const GX2Sampler *sampler) const {

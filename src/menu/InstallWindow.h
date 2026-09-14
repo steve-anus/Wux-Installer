@@ -1,12 +1,12 @@
 #ifndef INSTALL_WINDOW_H_
 #define INSTALL_WINDOW_H_
 
+#include <atomic>
 #include <string>
 #include <vector>
 
 #include "fs/CFolderList.hpp"
 #include "gui/MessageBox.h"
-#include "ProgressWindow.h"
 
 class MainWindow;
 
@@ -24,16 +24,25 @@ public:
 	// rear.rpx dummy, 00050010-10060000) are skipped as non-fatal instead
 	// of failing the chain - they are the extraction's own output and the
 	// console already ships them on NAND.
-	InstallWindow(CFolderList * list, bool deleteAfterInstall = false,
-	              bool skipConfirm = false, bool askDelete = false,
-	              const std::vector<std::string> &cleanupFiles =
-	                  std::vector<std::string>(),
-	              bool wuxFlow = false);
+	// finalNote: non-fatal extraction accounting (e.g. "extracted 2 of 3
+	// titles") appended to the final success message.
+	struct InstallOptions
+	{
+		bool deleteAfterInstall = false;
+		bool skipConfirm = false;
+		bool askDelete = false;
+		std::vector<std::string> cleanupFiles;
+		bool wuxFlow = false;
+		std::string finalNote;
+	};
+
+	InstallWindow(CFolderList * list, const InstallOptions & options);
 	~InstallWindow();
 	
 	void startInstalling()
 	{
-		resumeThread();
+		if(isCreated())
+			resumeThread();
 	}
 	
 	sigslot::signal1<GuiElement *> installWindowClosed;
@@ -52,6 +61,15 @@ private:
 	void executeThread();
 	void InstallProcess(int pos, int total);
 	
+	// Benign outcome for a skipped (non-installable) title in the WUX flow.
+	static const int kResultSkip = -100;
+
+	enum
+	{
+		NAND,
+		USB
+	};
+
 	GuiFrame * drcFrame;
 	GuiImage * blackBg;   // opaque background, hides the main screen behind
 	
@@ -62,7 +80,7 @@ private:
 	MainWindow * mainWindow;
 	
 	int folderCount;
-	bool canceled;
+	std::atomic<bool> canceled = { false };
 	bool deleteAfterInstall;
 	bool askDelete;        // WUX flow: show the delete-files prompt
 	bool deleteWuxFiles;   // set to true by the delete prompt answer (Yes)
@@ -73,16 +91,8 @@ private:
 	std::string lastGoodName; // name of the last installed title
 	bool wuxDeleteFailed;  // .wux/game.key cleanup failed (success note)
 	std::vector<std::string> cleanupFiles;   // .wux + game.key paths
-	int target;
-
-	// Benign outcome for a skipped (non-installable) title in the WUX flow.
-	static const int kResultSkip = -100;
-	
-	enum
-	{
-		NAND,
-		USB
-	};
+	std::string finalNote;     // extraction accounting for the final box
+	int target = NAND;         // set by the destination prompt before each title
 	
 };
 

@@ -63,7 +63,13 @@ private:
     GuiImage plusImg;
     GuiImage minusImg;
     GuiImage deleteImg;
-	
+
+	// Declared in init-list order: they are initialized between deleteImg
+	// and plusTxt, so the members must sit between them (member init follows
+	// declaration order, not the colon-list order).
+	GuiImageData *validImageData;
+	GuiImage validImg;
+
 	GuiText plusTxt;
 	GuiText minusTxt;
 	GuiText installTxt;
@@ -92,9 +98,6 @@ private:
     GuiImage* minusButtonSelectedImage;
     GuiImage* installButtonSelectedImage;
     GuiImage* deleteButtonSelectedImage;
-
-    GuiImageData *validImageData;
-    GuiImage validImg;
 
     int pageIndex;
 	int selectedItem;

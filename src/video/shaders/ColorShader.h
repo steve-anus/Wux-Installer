@@ -79,21 +79,35 @@ public:
         }
     }
 
+    //! Each uniform below owns one 16-byte constant slot (4 words): angle@0,
+    //! offset@4, scale@8 in the vertex block, colorIntensity@0 in the pixel
+    //! block. The declared types are FLOAT, FLOAT3 and FLOAT4, but a whole slot
+    //! is the smallest upload GX2 accepts, and counts that are not a multiple of
+    //! 4 words were seen on hardware to be dropped without any error - the
+    //! offset and scale never landed and the whole UI collapsed into a small box.
+    //! So the slot is uploaded complete, staged into 4 floats rather than reading
+    //! past the caller's float or vec3; the unread tail is don't-care, and at HEAD
+    //! it held whatever neighbour happened to sit there while still drawing fine.
     void setAngle(const float & val)
     {
-        VertexShader::setUniformReg(angleLocation, 4, &val);
+        const float regs[4] = { val, 0.0f, 0.0f, 0.0f };
+        VertexShader::setUniform4(angleLocation, regs);
     }
     void setOffset(const glm::vec3 & vec)
     {
-        VertexShader::setUniformReg(offsetLocation, 4, &vec[0]);
+        const float regs[4] = { vec.x, vec.y, vec.z, 0.0f };
+        VertexShader::setUniform4(offsetLocation, regs);
     }
     void setScale(const glm::vec3 & vec)
     {
-        VertexShader::setUniformReg(scaleLocation, 4, &vec[0]);
+        const float regs[4] = { vec.x, vec.y, vec.z, 0.0f };
+        VertexShader::setUniform4(scaleLocation, regs);
     }
     void setColorIntensity(const glm::vec4 & vec)
     {
-        PixelShader::setUniformReg(colorIntensityLocation, 4, &vec[0]);
+        //! pixel-block uniform; a vec4 is exactly one slot (pinned by the
+        //! static_assert in Shader.h)
+        PixelShader::setUniform4(colorIntensityLocation, &vec[0]);
     }
 };
 

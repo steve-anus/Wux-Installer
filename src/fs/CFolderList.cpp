@@ -159,6 +159,9 @@ void CFolderList::Click(int ind)
 
 void CFolderList::Reset()
 {
+	// Entries are heap-allocated in AddFolder(); clear() alone leaks them.
+	for (size_t i = 0; i < Folders.size(); ++i)
+		delete Folders[i];
 	Folders.clear();
 }
 

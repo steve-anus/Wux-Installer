@@ -23,20 +23,21 @@
 #include "wux/wux_installer.h"
 
 // Runs the .wux extraction on a worker thread so the main loop keeps
-// rendering while the files are written (the fork's install progress works
-// the same way: InstallWindow is a CThread that updates its MessageBox from
-// its own thread). This thread only calls simple setters on the progress
+// rendering while the files are written (InstallWindow's install progress
+// works the same way: a CThread that updates its MessageBox from its own
+// thread). This thread only calls simple setters on the progress
 // box - it never touches the GUI element tree.
 class WuxExtractThread : public CThread
 {
 public:
-    WuxExtractThread(const std::string &wuxPath, const std::string &keyPath,
-                     const std::string &commonKeyPath, const std::string &outRoot,
-                     MessageBox *progressBox);
+    WuxExtractThread(const std::string &wuxFile, const std::string &keyFile,
+                     const std::string &commonKeyFile, const std::string &installRoot,
+                     MessageBox *box);
 
     // Filled in by the worker when extract() returns. The main thread reads
-    // them only after isThreadTerminated() (both threads run on core 0, so
-    // the reads are serialized with the worker's writes).
+    // them only after isThreadTerminated() polls true, which orders the
+    // worker's writes before the reads; the render thread never touches
+    // them.
     wux::ExtractResult result;
     wux::Error error;
 
@@ -44,8 +45,8 @@ private:
     void executeThread();
 
     // Progress callback (see extract's ProgressFn): only simple setters on
-    // the progress box - the same cross-thread pattern the fork's
-    // InstallWindow uses for its install progress. Updates are throttled:
+    // the progress box - the same cross-thread pattern InstallWindow uses
+    // for its install progress. Updates are throttled:
     // the file name changes per content file, the bar per percent step.
     static void onProgress(int cur, int total, U32 contentId,
                            U64 doneBytes, U64 totalBytes, void *user);

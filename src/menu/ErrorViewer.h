@@ -19,4 +19,11 @@ class ErrorViewer
     private:
         FSClient *client;
         nn::erreula::CreateArg createArg;
+        // True when THIS instance fully constructed itself. Teardown is owned
+        // by the creating instance only, so a second instance whose Create()
+        // failed can never destroy the first one's erreula state.
+        bool ready;
+        // nn::erreula is a process-wide singleton, so readiness is mirrored
+        // here for the static draw entry points (single instance in practice).
+        static bool initialized;
 };

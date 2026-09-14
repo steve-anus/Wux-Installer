@@ -82,25 +82,33 @@ public:
         }
     }
 
+    //! Same contract as ColorShader.h: one 16-byte constant slot per uniform
+    //! (angle@0, offset@4, scale@8 in the vertex block; blur@0, colorIntensity@4
+    //! in the pixel block), uploaded complete and staged into 4 floats rather
+    //! than reading past a float or vec3.
     void setAngle(const float & val)
     {
-        VertexShader::setUniformReg(angleLocation, 4, &val);
+        const float regs[4] = { val, 0.0f, 0.0f, 0.0f };
+        VertexShader::setUniform4(angleLocation, regs);
     }
     void setOffset(const glm::vec3 & vec)
     {
-        VertexShader::setUniformReg(offsetLocation, 4, &vec[0]);
+        const float regs[4] = { vec.x, vec.y, vec.z, 0.0f };
+        VertexShader::setUniform4(offsetLocation, regs);
     }
     void setScale(const glm::vec3 & vec)
     {
-        VertexShader::setUniformReg(scaleLocation, 4, &vec[0]);
+        const float regs[4] = { vec.x, vec.y, vec.z, 0.0f };
+        VertexShader::setUniform4(scaleLocation, regs);
     }
     void setColorIntensity(const glm::vec4 & vec)
     {
-        PixelShader::setUniformReg(colorIntensityLocation, 4, &vec[0]);
+        PixelShader::setUniform4(colorIntensityLocation, &vec[0]);
     }
     void setBlurring(const glm::vec3 & vec)
     {
-        PixelShader::setUniformReg(blurLocation, 4, &vec[0]);
+        const float regs[4] = { vec.x, vec.y, vec.z, 0.0f };
+        PixelShader::setUniform4(blurLocation, regs);
     }
 
     void setTextureAndSampler(const GX2Texture *texture, const GX2Sampler *sampler) const {

@@ -166,10 +166,14 @@ void Scrollbar::OnDownButtonClick(GuiButton *button, const GuiController *contro
 void Scrollbar::OnBoxButtonHold(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
 {
     if(EntrieCount == 0)
+    {
         return;
+    }
 
-	if(!controller->data.validPointer)
-		return;
+    if(!controller->data.validPointer)
+    {
+        return;
+    }
 
 	int y = controller->data.y - this->getCenterY();
 
@@ -252,13 +256,13 @@ void Scrollbar::SetEntrieCount(int cnt)
 	listChanged(SelItem, SelInd);
 }
 
-void Scrollbar::setScrollboxPosition(int SelItem, int SelInd)
+void Scrollbar::setScrollboxPosition(int item, int ind)
 {
-    int position = MaxHeight-(MaxHeight-MinHeight)*(SelInd+SelItem)/(EntrieCount-1);
+    int position = MaxHeight-(MaxHeight-MinHeight)*(ind+item)/(EntrieCount-1);
 
-    if(position < MinHeight || (SelInd+SelItem >= EntrieCount-1))
+    if(position < MinHeight || (ind+item >= EntrieCount-1))
         position = MinHeight;
-    else if(position > MaxHeight || (SelInd+SelItem) == 0)
+    else if(position > MaxHeight || (ind+item) == 0)
         position = MaxHeight;
 
     scrollbarBoxBtn->setPosition(0, position);

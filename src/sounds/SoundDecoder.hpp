@@ -41,7 +41,7 @@ public:
 	virtual void Unlock() { mutex.unlock(); }
 	virtual int Read(u8 * buffer, int buffer_size, int pos);
 	virtual int Tell() { return CurPos; }
-	virtual int Seek(int pos) { CurPos = pos; return file_fd->seek(CurPos, SEEK_SET); }
+	virtual int Seek(int pos) { if(!file_fd) return -1; CurPos = pos; return file_fd->seek(CurPos, SEEK_SET); }
 	virtual int Rewind();
 	virtual u16 GetFormat() { return Format; }
 	virtual u16 GetSampleRate() { return SampleRate; }
@@ -90,10 +90,11 @@ protected:
 	int SoundBlockSize;
 	int CurPos;
 	bool ResampleTo48kHz;
-	bool Loop;
-	bool EndOfFile;
-	bool Decoding;
-	bool ExitRequested;
+	//! read by the decode thread and the frame callback / teardown paths
+	volatile bool Loop;
+	volatile bool EndOfFile;
+	volatile bool Decoding;
+	volatile bool ExitRequested;
 	u16 Format;
 	u16 SampleRate;
 	u8 *ResampleBuffer;

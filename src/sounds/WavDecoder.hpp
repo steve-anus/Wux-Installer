@@ -65,7 +65,8 @@ class WavDecoder : public SoundDecoder
 		void CloseFile();
 		u32 DataOffset;
 		u32 DataSize;
-		bool Is16Bit;
+		//! named so it does not hide the SoundDecoder::Is16Bit() accessor
+		bool Sample16Bit;
 };
 
 #endif

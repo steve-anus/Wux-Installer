@@ -286,9 +286,9 @@ void FreeTypeGX::loadGlyphData(FT_Bitmap *bmp, ftgxCharData *charData)
 	uint16_t *dst = (uint16_t *)charData->texture->surface.image;
 	int32_t x, y;
 
-	for(y = 0; y < bmp->rows; y++)
+	for(y = 0; y < (int32_t)bmp->rows; y++)
 	{
-		for(x = 0; x < bmp->width; x++)
+		for(x = 0; x < (int32_t)bmp->width; x++)
 		{
 		    uint8_t intensity = src[y * bmp->width + x] >> 3;
             dst[y * charData->texture->surface.pitch + x] = intensity ? ((intensity << 11) | (intensity << 6) | (intensity << 1) | 1) : 0;

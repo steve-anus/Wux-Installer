@@ -41,7 +41,6 @@ class CFile
 
 		int read(u8 * ptr, size_t size);
 		int write(const u8 * ptr, size_t size);
-		int fwrite(const char *format, ...);
 		int seek(long int offset, int origin);
 		u64 tell() { return pos; };
 		u64 size() { return filesize; };

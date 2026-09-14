@@ -18,9 +18,13 @@
 #include <proc_ui/procui.h>
 #include <coreinit/memdefaultheap.h>
 #include <nn/erreula.h>
+#include <unistd.h>
 #include "Application.h"
 #include "gui/FreeTypeGX.h"
-#include "gui/GuiImageAsync.h"
+#include "gui/GuiImage.h"
+#include "gui/GuiSound.h"
+#include "gui/GuiText.h"
+#include "gui/GuiTrigger.h"
 #include "gui/VPadController.h"
 #include "gui/WPadController.h"
 #include "resources/Resources.h"
@@ -28,7 +32,6 @@
 #include "system/exception_handler.h"
 #include "system/memory.h"
 #include "utils/logger.h"
-#include "video/CursorDrawer.h"
 
 Application *Application::applicationInstance = NULL;
 bool Application::exitApplication = false;
@@ -78,12 +81,10 @@ Application::~Application()
 		delete controller[i];
 	
 	AsyncDeleter::destroyInstance();
-	GuiImageAsync::threadExit();
 	Resources::Clear();
 	
 	SoundHandler::DestroyInstance();
 	
-	CursorDrawer::destroyInstance();
 	ProcUIShutdown();
 }
 
@@ -178,7 +179,19 @@ bool Application::procUI(void)
 				delete video;
 				video = nullptr;
 				
-				log_printf("deinitialze memory\n");
+				log_printf("deinitialize memory\n");
+				//! Queued deletions reference the exp heaps about to be
+				//! destroyed: hand them to the delete worker and wait (bounded)
+				//! for both queues to drain before releasing memory.
+				for(int i = 0; i < 200; i++)
+				{
+					AsyncDeleter::triggerDeleteProcess();
+					if(AsyncDeleter::deleteQueueEmpty())
+						break;
+					usleep(5000);
+				}
+				if(!AsyncDeleter::deleteQueueEmpty())
+					log_printf("memory: delete queue drain timed out\n");
 				memoryRelease();
 				ProcUIDrawDoneRelease();
 			}
@@ -195,7 +208,7 @@ bool Application::procUI(void)
 				if(video == nullptr)
 				{
 					log_printf("PROCUI_STATUS_IN_FOREGROUND\n");
-					log_printf("initialze memory\n");
+					log_printf("initialize memory\n");
 					memoryInitialize();
 					
 					log_printf("Initialize video\n");
@@ -204,8 +217,11 @@ bool Application::procUI(void)
 					
 					//! setup default Font
 					log_printf("Initialize main font system\n");
-					auto *fontSystem = new FreeTypeGX(Resources::GetFile("font.ttf"), Resources::GetFileSize("font.ttf"), true);
-					GuiText::setPresetFont(fontSystem);
+					if (fontSystem == nullptr)
+					{
+						fontSystem = new FreeTypeGX(Resources::GetFile("font.ttf"), Resources::GetFileSize("font.ttf"), true);
+						GuiText::setPresetFont(fontSystem);
+					}
 
 					if (mainWindow == nullptr)
 					{

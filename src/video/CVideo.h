@@ -168,10 +168,12 @@ public:
         rayDirection = glm::normalize(rayDirectionWorld);
     }
 private:
-    static void *GX2RAlloc(u32 flags, u32 size, u32 align);
-    static void GX2RFree(u32 flags, void* p);
-
     void renderFXAA(const GX2Texture * texture, const GX2Sampler *sampler);
+
+    //! which allocator served the AA aux buffers (MEM1 vs MEM2 fallback);
+    //! frees must go back through the very allocator that handed them out.
+    bool tvAaInMem1;
+    bool drcAaInMem1;
 
     void *gx2CommandBuffer;
 

@@ -56,14 +56,21 @@ bool DirList::LoadPath(const std::string & folder, const char *filter, u32 flags
 {
 	if(folder.empty()) return false;
 
+	//! A re-scan replaces the list; without this the entries would append
+	//! onto the previous scan.
+	ClearList();
+
 	Flags = flags;
 	Filter = filter;
 
 	std::string folderpath(folder);
-	u32 length = folderpath.size();
 
 	//! clear path of double slashes
 	RemoveDoubleSlashs(folderpath);
+
+	//! size AFTER the slash cleanup: RemoveDoubleSlashs shrinks the string,
+	//! a length captured before it could point past the new end.
+	u32 length = folderpath.size();
 
 	//! remove last slash if exists
 	if(length > 0 && folderpath[length-1] == '/')
@@ -183,10 +190,10 @@ static bool SortCallback(const DirEntry & f1, const DirEntry & f2)
 	if(f1.FilePath && !f2.FilePath) return true;
 	if(!f1.FilePath) return false;
 
-	if(strcasecmp(f1.FilePath, f2.FilePath) > 0)
-		return false;
+	if(strcasecmp(f1.FilePath, f2.FilePath) < 0)
+		return true;
 
-	return true;
+	return false;
 }
 
 void DirList::SortList()

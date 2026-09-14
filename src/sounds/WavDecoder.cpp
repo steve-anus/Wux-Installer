@@ -32,7 +32,8 @@ WavDecoder::WavDecoder(const char * filepath)
 {
 	SoundType = SOUND_WAV;
 	SampleRate = 48000;
-	Format = CHANNELS_STEREO | FORMAT_PCM_16_BIT;
+	Format = (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT);
+	Sample16Bit = false;
 
 	if(!file_fd)
 		return;
@@ -45,7 +46,8 @@ WavDecoder::WavDecoder(const u8 * snd, int len)
 {
 	SoundType = SOUND_WAV;
 	SampleRate = 48000;
-	Format = CHANNELS_STEREO | FORMAT_PCM_16_BIT;
+	Format = (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT);
+	Sample16Bit = false;
 
 	if(!file_fd)
 		return;
@@ -65,8 +67,17 @@ void WavDecoder::OpenFile()
 	memset(&Header, 0, sizeof(SWaveHdr));
 	memset(&FmtChunk, 0, sizeof(SWaveFmtChunk));
 
-	file_fd->read((u8 *) &Header, sizeof(SWaveHdr));
-	file_fd->read((u8 *) &FmtChunk, sizeof(SWaveFmtChunk));
+	if(file_fd->read((u8 *) &Header, sizeof(SWaveHdr)) != (int) sizeof(SWaveHdr))
+	{
+		CloseFile();
+		return;
+	}
+
+	if(file_fd->read((u8 *) &FmtChunk, sizeof(SWaveFmtChunk)) != (int) sizeof(SWaveFmtChunk))
+	{
+		CloseFile();
+		return;
+	}
 
 	if (Header.magicRIFF != 0x52494646) // 'RIFF'
 	{
@@ -84,15 +95,47 @@ void WavDecoder::OpenFile()
 		return;
 	}
 
-	DataOffset = sizeof(SWaveHdr)+le32(FmtChunk.size)+8;
-	file_fd->seek(DataOffset, SEEK_SET);
-	SWaveChunk DataChunk;
-	file_fd->read((u8 *) &DataChunk, sizeof(SWaveChunk));
+	const u64 fileSize = file_fd->size();
 
+	//! every offset below is computed wide so a hostile size cannot wrap
+	u64 offset = (u64) sizeof(SWaveHdr) + (u64) le32(FmtChunk.size) + 8;
+	if(offset + 8 > fileSize)
+	{
+		CloseFile();
+		return;
+	}
+
+	DataOffset = (u32) offset;
+	file_fd->seek(DataOffset, SEEK_SET);
+
+	SWaveChunk DataChunk;
+	memset(&DataChunk, 0, sizeof(SWaveChunk));
+	if(file_fd->read((u8 *) &DataChunk, sizeof(SWaveChunk)) != (int) sizeof(SWaveChunk))
+	{
+		CloseFile();
+		return;
+	}
+
+	int chunks = 0;
 	while(DataChunk.magicDATA != 0x64617461) // 'data'
 	{
-		DataOffset += 8+le32(DataChunk.size);
+		if(++chunks > 64)
+		{
+			CloseFile();
+			return;
+		}
+
+		offset = (u64) DataOffset + 8 + (u64) le32(DataChunk.size);
+		if(offset + 8 > fileSize)
+		{
+			CloseFile();
+			return;
+		}
+
+		DataOffset = (u32) offset;
 		file_fd->seek(DataOffset, SEEK_SET);
+
+		memset(&DataChunk, 0, sizeof(SWaveChunk));
 		int ret = file_fd->read((u8 *) &DataChunk, sizeof(SWaveChunk));
 		if(ret <= 0)
 		{
@@ -103,17 +146,21 @@ void WavDecoder::OpenFile()
 
 	DataOffset += 8;
 	DataSize = le32(DataChunk.size);
-	Is16Bit = (le16(FmtChunk.bps) == 16);
+	//! the data block may never reach past the end of the file
+	if((u64) DataOffset + (u64) DataSize > fileSize)
+		DataSize = (u32) (fileSize - DataOffset);
+
+	Sample16Bit = (le16(FmtChunk.bps) == 16);
 	SampleRate = le32(FmtChunk.freq);
 
 	if (le16(FmtChunk.channels) == 1 && le16(FmtChunk.bps) == 8 && le16(FmtChunk.alignment) <= 1)
-		Format = CHANNELS_MONO | FORMAT_PCM_8_BIT;
+		Format = (u16)((u16)CHANNELS_MONO | (u16)FORMAT_PCM_8_BIT);
 	else if (le16(FmtChunk.channels) == 1 && le16(FmtChunk.bps) == 16 && le16(FmtChunk.alignment) <= 2)
-		Format = CHANNELS_MONO | FORMAT_PCM_16_BIT;
+		Format = (u16)((u16)CHANNELS_MONO | (u16)FORMAT_PCM_16_BIT);
 	else if (le16(FmtChunk.channels) == 2 && le16(FmtChunk.bps) == 8 && le16(FmtChunk.alignment) <= 2)
-		Format = CHANNELS_STEREO | FORMAT_PCM_8_BIT;
+		Format = (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_8_BIT);
 	else if (le16(FmtChunk.channels) == 2 && le16(FmtChunk.bps) == 16 && le16(FmtChunk.alignment) <= 4)
-		Format = CHANNELS_STEREO | FORMAT_PCM_16_BIT;
+		Format = (u16)((u16)CHANNELS_STEREO | (u16)FORMAT_PCM_16_BIT);
 }
 
 void WavDecoder::CloseFile()
@@ -129,18 +176,21 @@ int WavDecoder::Read(u8 * buffer, int buffer_size, int pos)
 	if(!file_fd)
 		return -1;
 
-	if(CurPos >= (int) DataSize)
+	if(CurPos < 0 || (u32) CurPos >= DataSize)
 		return 0;
+
+	if(buffer_size < 0)
+		return -1;
 
 	file_fd->seek(DataOffset+CurPos, SEEK_SET);
 
-	if(buffer_size > (int) DataSize-CurPos)
-		buffer_size = DataSize-CurPos;
+	if((u32) buffer_size > DataSize - (u32) CurPos)
+		buffer_size = (int) (DataSize - (u32) CurPos);
 
 	int read = file_fd->read(buffer, buffer_size);
 	if(read > 0)
 	{
-		if (Is16Bit)
+		if (Sample16Bit)
 		{
 			read &= ~0x0001;
 

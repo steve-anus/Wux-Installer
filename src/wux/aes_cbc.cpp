@@ -105,7 +105,7 @@ void keyExpand(const U8* key, size_t keyLen, U8 rk[16 * 15], int& nr) {
               | ((U32)S[(t >> 16) & 0xff] << 16)
               | ((U32)S[(t >> 8) & 0xff] << 8)
               |  (U32)S[(t >> 0) & 0xff];
-            t ^= ((U32)rcon[i / nk] << 24);  
+            t ^= ((U32)rcon[i / nk] << 24);
         } else if (nk > 6 && i % nk == 4) {
             t = ((U32)S[(t >> 24) & 0xff] << 24)
               | ((U32)S[(t >> 16) & 0xff] << 16)

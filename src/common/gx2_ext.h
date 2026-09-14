@@ -50,6 +50,16 @@ static const u32 texture_comp_selector[54] = {
     GX2_COMP_SEL_XYZ1, GX2_COMP_SEL_XYZW, GX2_COMP_SEL_XYZW, GX2_COMP_SEL_XYZW, GX2_COMP_SEL_X001, GX2_COMP_SEL_XY01
 };
 
+#if defined(__cplusplus)
+/* Callers index the two tables with (format & 0xff) / (format & 0x3f);
+   every GX2 attrib/surface format compiled into this app stays below the
+   entry counts pinned here, so the masks cannot reach out of bounds. */
+static_assert(sizeof(attribute_dest_comp_selector) / sizeof(attribute_dest_comp_selector[0]) == 20,
+              "attribute_dest_comp_selector must hold 20 entries");
+static_assert(sizeof(texture_comp_selector) / sizeof(texture_comp_selector[0]) == 54,
+              "texture_comp_selector must hold 54 entries");
+#endif
+
 typedef struct _GX2Color {
     u8 r, g, b, a;
 } GX2Color;

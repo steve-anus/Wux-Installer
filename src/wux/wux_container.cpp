@@ -19,6 +19,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <sys/types.h>
+
+// POSIX off_t carries every disc offset (lseek/SEEK_END at :46 and the U64 cast at :102).
+static_assert(sizeof(off_t) >= 8, "off_t must be 64-bit: .wux offsets exceed 2 GiB");
 
 namespace wux {
 

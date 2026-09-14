@@ -47,23 +47,23 @@ void WuxExtractThread::onProgress(int cur, int total, U32 contentId,
     }
 }
 
-WuxExtractThread::WuxExtractThread(const std::string &wuxPath,
-                                   const std::string &keyPath,
-                                   const std::string &commonKeyPath,
-                                   const std::string &outRoot,
-                                   MessageBox *progressBox)
-    // Worker stack is 192 KiB (vs the fork's 32 KiB default): the extraction
-    // call chain (extract + I/O + stdio frames) needs the headroom. Same
-    // core-0 pinning and priority as InstallWindow's thread.
+WuxExtractThread::WuxExtractThread(const std::string &wuxFile,
+                                   const std::string &keyFile,
+                                   const std::string &commonKeyFile,
+                                   const std::string &installRoot,
+                                   MessageBox *box)
+    // Worker stack is 192 KiB (the CThread default 32 KiB is not enough):
+    // the extraction call chain (extract + I/O + stdio frames) needs the
+    // headroom. Same core-0 pinning and priority as InstallWindow's thread.
     : CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff,
               16, 0x30000)
     , result()
     , error(wux::Error::Ok)
-    , wuxPath(wuxPath)
-    , keyPath(keyPath)
-    , commonKeyPath(commonKeyPath)
-    , outRoot(outRoot)
-    , progressBox(progressBox)
+    , wuxPath(wuxFile)
+    , keyPath(keyFile)
+    , commonKeyPath(commonKeyFile)
+    , outRoot(installRoot)
+    , progressBox(box)
     , lastContent(0)
     , lastPercent(-1)
 {

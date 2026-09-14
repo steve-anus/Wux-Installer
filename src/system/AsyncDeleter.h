@@ -18,6 +18,7 @@
 #define _ASYNC_DELETER_H
 
 #include <queue>
+#include <atomic>
 #include "CThread.h"
 #include "CMutex.h"
 
@@ -26,8 +27,14 @@ class AsyncDeleter : public CThread
 public:
     static void destroyInstance()
     {
-        delete deleterInstance;
-        deleterInstance = NULL;
+        // Latch before releasing the object: ~AsyncDeleter drains its queues
+        // and a destructor it runs can call pushForDelete again. With the flag
+        // set first that nested call leaks (logged) instead of lazily building
+        // a fresh worker at teardown that nobody would ever join.
+        instanceUnavailable.store(true, std::memory_order_release);
+        AsyncDeleter *inst = deleterInstance.load(std::memory_order_acquire);
+        deleterInstance.store(NULL, std::memory_order_release);
+        delete inst;
     }
 
     class Element
@@ -37,13 +44,13 @@ public:
         virtual ~Element() {}
     };
 
-    static void pushForDelete(AsyncDeleter::Element *e)
-    {
-        if(!deleterInstance)
-            deleterInstance = new AsyncDeleter;
+    //!Queues an element for deferred deletion on the delete worker thread.
+    //!May be called from any thread.
+    static void pushForDelete(AsyncDeleter::Element *e);
 
-        deleterInstance->deleteElements.push(e);
-    }
+    //!True when both pending queues are empty; callers use it to wait for
+    //!all queued deletions before tearing down the heaps the objects live in.
+    static bool deleteQueueEmpty();
 
     static void triggerDeleteProcess(void);
 
@@ -51,11 +58,23 @@ private:
     AsyncDeleter();
     virtual ~AsyncDeleter();
 
-    static AsyncDeleter *deleterInstance;
+    //! Published with release/acquire rather than as a plain pointer: the
+    //! fast path below reads it outside instanceMutex, and on weakly ordered
+    //! POWER a non-NULL read must not arrive before the constructor's writes
+    //! (especially CMutex::pMutex, which CMutex treats as a silent no-op).
+    static std::atomic<AsyncDeleter *> deleterInstance;
+    //! Latched when the worker could not be created, or once it is destroyed.
+    //! Without this every push would retry new/memalign/delete on the caller's
+    //! thread - often the GUI thread inside a signal emit - forever.
+    static std::atomic<bool> instanceUnavailable;
 
     void executeThread(void);
 
-    bool exitApplication;
+    //! creates the singleton on first use; NULL when the thread could not start
+    static AsyncDeleter * getDeleterInstance(void);
+
+    //!Set from the main thread, polled by the delete worker loop.
+    std::atomic<bool> exitApplication;
     std::queue<AsyncDeleter::Element *> deleteElements;
     std::queue<AsyncDeleter::Element *> realDeleteElements;
     CMutex deleteMutex;

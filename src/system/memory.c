@@ -21,6 +21,7 @@
 #include <coreinit/memfrmheap.h>
 #include "common/common.h"
 #include "memory.h"
+#include "utils/logger.h"
 
 #define MEMORY_ARENA_1          0
 #define MEMORY_ARENA_2          1
@@ -46,7 +47,12 @@ void memoryInitialize(void)
         uint32_t mem1_allocatable_size = MEMGetAllocatableSizeForFrmHeapEx(mem1_heap_handle, 4);
         void* mem1_memory = MEMAllocFromFrmHeapEx(mem1_heap_handle, mem1_allocatable_size, 4);
         if (mem1_memory)
-            mem1_heap = MEMCreateExpHeapEx(mem1_memory, mem1_allocatable_size, 0);
+            //! MEM_HEAP_FLAG_USE_LOCK: the render thread and the async deleter
+            //thread allocate from these heaps concurrently; an unlocked heap
+            //corrupts its control block.
+            mem1_heap = MEMCreateExpHeapEx(mem1_memory, mem1_allocatable_size, MEM_HEAP_FLAG_USE_LOCK);
+        if (!mem1_heap)
+            log_printf("memory: MEM1 exp heap creation failed\n");
     }
 
     if (!bucket_heap) {
@@ -54,7 +60,9 @@ void memoryInitialize(void)
         uint32_t bucket_allocatable_size = MEMGetAllocatableSizeForFrmHeapEx(bucket_heap_handle, 4);
         void* bucket_memory = MEMAllocFromFrmHeapEx(bucket_heap_handle, bucket_allocatable_size, 4);
         if (bucket_memory)
-            bucket_heap = MEMCreateExpHeapEx(bucket_memory, bucket_allocatable_size, 0);
+            bucket_heap = MEMCreateExpHeapEx(bucket_memory, bucket_allocatable_size, MEM_HEAP_FLAG_USE_LOCK);
+        if (!bucket_heap)
+            log_printf("memory: framebuffer bucket exp heap creation failed\n");
     }
 }
 
@@ -71,96 +79,24 @@ void memoryRelease(void)
         bucket_heap = NULL;
     }
 }
-/*
-//!-------------------------------------------------------------------------------------------
-//! wraps
-//!-------------------------------------------------------------------------------------------
-void *__wrap_malloc(size_t size)
-{
-    // pointer to a function resolve
-	return ((void * (*)(size_t))(*pMEMAllocFromDefaultHeap))(size);
-}
-
-void *__wrap_memalign(size_t align, size_t size)
-{
-    if (align < 4)
-        align = 4;
-
-    // pointer to a function resolve
-    return ((void * (*)(size_t, size_t))(*pMEMAllocFromDefaultHeapEx))(size, align);
-}
-
-void __wrap_free(void *p)
-{
-    // pointer to a function resolve
-    if(p != 0)
-        ((void (*)(void *))(*pMEMFreeToDefaultHeap))(p);
-}
-
-void *__wrap_calloc(size_t n, size_t size)
-{
-    void *p = __wrap_malloc(n * size);
-	if (p != 0) {
-		memset(p, 0, n * size);
-	}
-	return p;
-}
-
-size_t __wrap_malloc_usable_size(void *p)
-{
-    //! TODO: this is totally wrong and needs to be addressed
-	return 0x7FFFFFFF;
-}
-
-void *__wrap_realloc(void *p, size_t size)
-{
-    void *new_ptr = __wrap_malloc(size);
-	if (new_ptr != 0)
-	{
-		memcpy(new_ptr, p, __wrap_malloc_usable_size(p) < size ? __wrap_malloc_usable_size(p) : size);
-		__wrap_free(p);
-	}
-	return new_ptr;
-}
-
-//!-------------------------------------------------------------------------------------------
-//! reent versions
-//!-------------------------------------------------------------------------------------------
-void *__wrap__malloc_r(struct _reent *r, size_t size)
-{
-	return __wrap_malloc(size);
-}
-
-void *__wrap__calloc_r(struct _reent *r, size_t n, size_t size)
-{
-    return __wrap_calloc(n, size);
-}
-
-void *__wrap__memalign_r(struct _reent *r, size_t align, size_t size)
-{
-    return __wrap_memalign(align, size);
-}
-
-void __wrap__free_r(struct _reent *r, void *p)
-{
-    __wrap_free(p);
-}
-
-size_t __wrap__malloc_usable_size_r(struct _reent *r, void *p)
-{
-    return __wrap_malloc_usable_size(p);
-}
-
-void *__wrap__realloc_r(struct _reent *r, void *p, size_t size)
-{
-    return __wrap_realloc(p, size);
-}
-*/
 //!-------------------------------------------------------------------------------------------
 //! some wrappers
 //!-------------------------------------------------------------------------------------------
 void * MEM2_alloc(unsigned int size, unsigned int align)
 {
+    if (align < 4)
+        align = 4;
+    //! memalign requires a power-of-two alignment; round up otherwise.
+    if (align & (align - 1))
+    {
+        align--;
+        align |= align >> 1;
+        align |= align >> 2;
+        align |= align >> 4;
+        align |= align >> 8;
+        align |= align >> 16;
+        align++;
+    }
     return memalign(align, size);
 }
 
@@ -171,6 +107,11 @@ void MEM2_free(void *ptr)
 
 void * MEM1_alloc(unsigned int size, unsigned int align)
 {
+    if (!mem1_heap) {
+        static int warned = 0;
+        if (!warned) { warned = 1; log_printf("memory: MEM1_alloc called with no heap\n"); }
+        return NULL;
+    }
     if (align < 4)
         align = 4;
     return MEMAllocFromExpHeapEx(mem1_heap, size, align);
@@ -178,11 +119,18 @@ void * MEM1_alloc(unsigned int size, unsigned int align)
 
 void MEM1_free(void *ptr)
 {
+    if (!ptr || !mem1_heap)
+        return;
     MEMFreeToExpHeap(mem1_heap, ptr);
 }
 
 void * MEMBucket_alloc(unsigned int size, unsigned int align)
 {
+    if (!bucket_heap) {
+        static int warned = 0;
+        if (!warned) { warned = 1; log_printf("memory: MEMBucket_alloc called with no heap\n"); }
+        return NULL;
+    }
     if (align < 4)
         align = 4;
     return MEMAllocFromExpHeapEx(bucket_heap, size, align);
@@ -190,5 +138,7 @@ void * MEMBucket_alloc(unsigned int size, unsigned int align)
 
 void MEMBucket_free(void *ptr)
 {
+    if (!ptr || !bucket_heap)
+        return;
     MEMFreeToExpHeap(bucket_heap, ptr);
 }

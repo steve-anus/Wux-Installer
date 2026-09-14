@@ -19,8 +19,10 @@
 
 #include <malloc.h>
 #include <unistd.h>
+#include <cstring>
 #include <coreinit/thread.h>
 #include "common/types.h"
+#include "utils/logger.h"
 
 class CThread
 {
@@ -33,6 +35,8 @@ public:
 		, pThreadStack(NULL)
 		, pCallback(callback)
 		, pCallbackArg(callbackArg)
+		, threadCreated(false)
+		, createRet(-1)
 	{
 	    //! save attribute assignment
 	    iAttributes = iAttr;
@@ -42,7 +46,18 @@ public:
 		pThreadStack = (u8 *) memalign(0x20, iStackSize);
         //! create the thread
 		if(pThread && pThreadStack)
-            OSCreateThread(pThread, &CThread::threadCallback, 1, (char*)this, pThreadStack+iStackSize, iStackSize, iPriority, iAttributes);
+		{
+			//! zero the block so a failed create leaves recognizable emptiness:
+			//! coreinit writes the entry point only on success. (OSCreateThread
+			//! is a coreinit import returning BOOL by Nintendo convention, but
+			//! detection via fields does not depend on that convention.)
+			std::memset(pThread, 0, sizeof(OSThread));
+			int ret = OSCreateThread(pThread, &CThread::threadCallback, 1, (char*)this, pThreadStack+iStackSize, iStackSize, iPriority, iAttributes);
+			threadCreated = (pThread->entryPoint ==
+			                 (OSThreadEntryPointFn)&CThread::threadCallback);
+			createRet = ret;
+			log_printf("CThread: OSCreateThread ret=%d created=%d\n", ret, (int)threadCreated);
+		}
 	}
 
 	//! destructor
@@ -55,6 +70,8 @@ public:
 
 	//! Get thread ID
 	virtual void* getThread() const { return pThread; }
+	//! True when OSCreateThread() succeeded and the thread object is still owned
+	bool isCreated() const { return threadCreated && pThread != NULL; }
 	//! Thread entry function
 	virtual void executeThread(void)
 	{
@@ -71,24 +88,42 @@ public:
 	virtual bool isThreadSuspended(void) const { if(pThread) return OSIsThreadSuspended(pThread); return false; }
 	//! Check if thread is terminated
 	virtual bool isThreadTerminated(void) const { if(pThread) return OSIsThreadTerminated(pThread); return false; }
-	//! Check if thread is running
-	virtual bool isThreadRunning(void) const { return !isThreadSuspended() && !isThreadRunning(); }
 	//! Shutdown thread
 	virtual void shutdownThread(void)
 	{
-		//! wait for thread to finish
-		if(pThread && !(iAttributes & eAttributeDetach))
+		if(!pThread)
+		{
+			//! the stack was still allocated when only the thread block failed
+			if(pThreadStack)
+				free(pThreadStack);
+			pThreadStack = NULL;
+			return;
+		}
+
+		//! wait for the thread to finish, only when OSCreateThread() succeeded
+		if(threadCreated && !(iAttributes & eAttributeDetach))
 		{
 		    if(isThreadSuspended())
                 resumeThread();
 
 			OSJoinThread(pThread, NULL);
 		}
-		//! free the thread stack buffer
-		if(pThreadStack)
-			free(pThreadStack);
-		if(pThread)
-			free(pThread);
+		// Fail-safe for the field-based create detection: a raw return of
+		// 0 or 1 could have meant success under either plausible
+		// convention, so "field says not created" is not trusted there and
+		// the memory is kept (leaked) rather than freed under a possibly
+		// live thread. Any other return (including -1: create never ran)
+		// is an unambiguous failure and is freed normally.
+		if(threadCreated || (createRet != 0 && createRet != 1))
+		{
+			//! free the thread stack buffer
+			if(pThreadStack)
+				free(pThreadStack);
+			if(pThread)
+				free(pThread);
+		}
+		else
+			log_printf("CThread: create status ambiguous, thread memory kept\n");
 
 		pThread = NULL;
 		pThreadStack = NULL;
@@ -115,6 +150,8 @@ private:
 	u8 *pThreadStack;
 	Callback pCallback;
 	void *pCallbackArg;
+	bool threadCreated;
+	int createRet;
 };
 
 #endif

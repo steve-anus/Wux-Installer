@@ -14,12 +14,12 @@ extern "C" {
 void log_init();
 void log_deinit(void);
 void log_print(const char *str);
-void log_printf(const char *format, ...);
+void log_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
 #else
-#define log_init(x)
-#define log_deinit()
-#define log_print(x)
-#define log_printf(x, ...)
+#define log_init()        ((void) 0)
+#define log_deinit()      ((void) 0)
+#define log_print(s)      ((void) 0)
+#define log_printf(...)   ((void) 0)
 #endif
 
 #ifdef __cplusplus

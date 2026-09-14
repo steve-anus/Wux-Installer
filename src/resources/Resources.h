@@ -4,6 +4,7 @@
 #include <map>
 #include <string>
 #include "common/types.h"
+#include "system/CMutex.h"
 
 //! forward declaration
 class GuiImageData;
@@ -24,6 +25,12 @@ public:
     static void RemoveSound(GuiSound * sound);
 private:
     static Resources *instance;
+
+    //! Guards the maps and the lazy instance creation: GuiImage/GuiSound
+    //! destructors run on the delete worker thread while the main thread
+    //! keeps loading resources. OSMutex is recursive, so same-thread
+    //! nesting (e.g. constructors calling GetImageData) is safe.
+    static CMutex resourceMutex;
 
     Resources() {}
     ~Resources() {}

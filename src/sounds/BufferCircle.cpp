@@ -65,6 +65,9 @@ void BufferCircle::Resize(int size)
 	while(size < Size())
 		RemoveBuffer(Size()-1);
 
+	//! the current position may be outside the shrunken circle
+	which = 0;
+
 	int oldSize = Size();
 
 	SoundBuffer.resize(size);
@@ -120,6 +123,14 @@ void BufferCircle::FreeBuffer()
 
 void BufferCircle::LoadNext()
 {
+	if(!Valid(which))
+	{
+		if(Size() == 0)
+			return;
+
+		which = 0;
+	}
+
 	BufferReady[which] = false;
 	BufferSize[which] = 0;
 

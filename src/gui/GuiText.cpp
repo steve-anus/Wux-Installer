@@ -261,12 +261,12 @@ void GuiText::setFontSize(int s)
 	size = s;
 }
 
-void GuiText::setMaxWidth(int width, int w)
+void GuiText::setMaxWidth(int w, int m)
 {
-	maxWidth = width;
-	wrapMode = w;
+	maxWidth = w;
+	wrapMode = m;
 
-	if(w == SCROLL_HORIZONTAL)
+	if(m == SCROLL_HORIZONTAL)
 	{
 		textScrollPos = 0;
 		textScrollInitialDelay = TEXT_SCROLL_INITIAL_DELAY;
@@ -569,7 +569,7 @@ void GuiText::draw(CVideo *pVideo)
 		else if(wrapMode == WRAP)
 		{
 			int lineheight = currentSize + 6;
-			int yoffset = 0;
+			int textYOffset = 0;
 			int voffset = 0;
 
 			if(textDyn.size() == 0)
@@ -588,8 +588,8 @@ void GuiText::draw(CVideo *pVideo)
 
 			for(u32 i = 0; i < textDyn.size(); i++)
 			{
-				font->drawText(pVideo, getCenterX(), getCenterY() + voffset + yoffset, getDepth(), textDyn[i], currentSize, color, alignment, textDynWidth[i], defaultBlur, blurGlowIntensity, blurGlowColor);
-                yoffset -= lineheight;
+				font->drawText(pVideo, getCenterX(), getCenterY() + voffset + textYOffset, getDepth(), textDyn[i], currentSize, color, alignment, textDynWidth[i], defaultBlur, blurGlowIntensity, blurGlowColor);
+                textYOffset -= lineheight;
 			}
 		}
 	}

@@ -43,6 +43,7 @@ public:
     {
         lastLoopCounter = 0;
         nextBufferSize = 0;
+        bytesPerSample = 2;
 
         voice = AXAcquireVoice(prio, 0, 0);
         if(voice)
@@ -75,14 +76,25 @@ public:
         if(!voice)
             return;
 
+        if(!buffer || bufferSize < 2)
+            return;
+
         memset(&voiceBuffer, 0, sizeof(voiceBuffer));
+
+        /*
+         * offsets are counted in samples, so they depend on the sample width
+         * (formats arrive as the low byte of the decoder format: 0x0A 16 bit,
+         * 0x19 8 bit)
+         */
+        bytesPerSample = (format == AX_VOICE_FORMAT_LPCM8) ? 1 : 2;
 
         voiceBuffer.data = buffer;
         voiceBuffer.dataType = format;
         voiceBuffer.loopingEnabled = (nextBuffer == NULL) ? 0 : 1;
         voiceBuffer.currentOffset = 0;
-        voiceBuffer.endOffset = (bufferSize >> 1) - 1;
-        voiceBuffer.loopOffset = ((nextBuffer - buffer) >> 1);
+        voiceBuffer.endOffset = (bufferSize / bytesPerSample) - 1;
+        voiceBuffer.loopOffset = (nextBuffer == NULL) ? 0 :
+                                 ((u32) (nextBuffer - buffer) / bytesPerSample);
         nextBufferSize = nextBufSize;
 
         // TODO: handle support for 3.1.0 with dynamic libs instead of static linking it
@@ -118,7 +130,17 @@ public:
 
     void setNextBuffer(const u8 *buffer, u32 bufferSize)
     {
-        voiceBuffer.loopOffset = ((buffer - (const u8*)voiceBuffer.data) >> 1);
+        if(!voice)
+            return;
+
+        if(!buffer || bufferSize < 2)
+            return;
+
+        if(!voiceBuffer.data || buffer < (const u8 *) voiceBuffer.data)
+            voiceBuffer.loopOffset = 0;
+        else
+            voiceBuffer.loopOffset = (u32) (buffer - (const u8 *) voiceBuffer.data) / bytesPerSample;
+
         nextBufferSize = bufferSize;
 
         AXSetVoiceLoopOffset(voice, voiceBuffer.loopOffset);
@@ -126,11 +148,15 @@ public:
 
     bool isBufferSwitched()
     {
+        if(!voice)
+            return false;
+
         u32 loopCounter = AXGetVoiceLoopCount(voice);
         if(lastLoopCounter != loopCounter)
         {
             lastLoopCounter = loopCounter;
-            AXSetVoiceEndOffset(voice, voiceBuffer.loopOffset  + (nextBufferSize >> 1) - 1);
+            u32 nextSamples = (nextBufferSize >= bytesPerSample) ? (nextBufferSize / bytesPerSample) : 1;
+            AXSetVoiceEndOffset(voice, voiceBuffer.loopOffset + nextSamples - 1);
             return true;
         }
         return false;
@@ -138,7 +164,7 @@ public:
 
     u32 getInternState() const {
         if(voice)
-            return ((u32 *)voice)[1];
+            return *(volatile const u32 *) &voice->state;
         return 0;
     }
     u32 getState() const {
@@ -159,6 +185,7 @@ private:
     u32 state;
     u32 nextBufferSize;
     u32 lastLoopCounter;
+    u32 bytesPerSample;
 };
 
 #endif // _AXSOUND_H_

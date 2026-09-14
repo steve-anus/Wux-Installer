@@ -38,6 +38,12 @@ MessageBox::MessageBox(int typeButtons, int typeIcons, bool progressbar)
 	, progressBar(progressbar)
 {   
 	selectedButtonDPAD = -1;
+	pendingTitle = false;
+	pendingMessage1 = false;
+	pendingMessage2 = false;
+	pendingInfo = false;
+	pendingProgress = false;
+	pendingProgressVal = 0.0f;
 	
 	bgBlur.setAlpha(0.5f);
     append(&bgBlur);
@@ -139,6 +145,7 @@ MessageBox::~MessageBox()
 
 void MessageBox::reload(std::string title, std::string message1, std::string message2, int typeButtons, int typeIcons, bool progressbar, std::string pbInfo)
 {
+	crossThreadMutex.lock();
 	newButtonsType = typeButtons;
 	newIconType = typeIcons;
 	newProgressBar = progressbar;
@@ -146,6 +153,7 @@ void MessageBox::reload(std::string title, std::string message1, std::string mes
 	newMessage1 = message1;
 	newMessage2 = message2;
 	newInfo = pbInfo;
+	crossThreadMutex.unlock();
 	
 	this->setState(GuiElement::STATE_DISABLED);
 	
@@ -170,14 +178,30 @@ void MessageBox::OnReloadFadeOutFinished(GuiElement * element)
 	if(progressBar)
 		this->remove(&progressFrame);
 	
-	setTitle(newTitle);
-	setMessage1(newMessage1);
-	setMessage2(newMessage2);
-	setIcon(newIconType);
-	setButtons(newButtonsType);
-	setProgressBarInfo(newInfo);
+	// Snapshot the reload payload under the same lock reload() writes
+	// through (reload may run on a worker thread), then queue the strings
+	// via the staging setters - applied in updateEffects().
+	std::string titleSnap, msg1Snap, msg2Snap, infoSnap;
+	int iconSnap, buttonsSnap;
+	bool pbSnap;
+	crossThreadMutex.lock();
+	titleSnap = newTitle;
+	msg1Snap = newMessage1;
+	msg2Snap = newMessage2;
+	infoSnap = newInfo;
+	iconSnap = newIconType;
+	buttonsSnap = newButtonsType;
+	pbSnap = newProgressBar;
+	crossThreadMutex.unlock();
+
+	setTitle(titleSnap);
+	setMessage1(msg1Snap);
+	setMessage2(msg2Snap);
+	setIcon(iconSnap);
+	setButtons(buttonsSnap);
+	setProgressBarInfo(infoSnap);
 	
-	progressBar = newProgressBar;
+	progressBar = pbSnap;
 	if(progressBar)
 	{
 		progressFrame.setEffect(EFFECT_FADE, 10, 255);
@@ -188,9 +212,9 @@ void MessageBox::OnReloadFadeOutFinished(GuiElement * element)
 	titleText.setEffect(EFFECT_FADE, 10, 255);
 	messageText1.setEffect(EFFECT_FADE, 10, 255);
 	messageText2.setEffect(EFFECT_FADE, 10, 255);
-	if(newIconType != IT_NOICON)
+	if(iconSnap != IT_NOICON)
 		iconImage->setEffect(EFFECT_FADE, 10, 255);
-	if(newButtonsType != BT_NOBUTTON)
+	if(buttonsSnap != BT_NOBUTTON)
 	{
 		for(int i = 0; i < buttonCount; i++)
 			messageButtons[i].messageButton->setEffect(EFFECT_FADE, 10, 255);
@@ -209,17 +233,28 @@ void MessageBox::OnReloadFadeInFinished(GuiElement * element)
 
 void MessageBox::setTitle(const std::string & title)
 {
-	titleText.setText(title.c_str());
+	// Queue only: may be called from a worker thread. GuiText rebuilds its
+	// glyph buffer on setText, which must stay on the render thread.
+	crossThreadMutex.lock();
+	pendingTitleText = title;
+	pendingTitle = true;
+	crossThreadMutex.unlock();
 }
 
 void MessageBox::setMessage1(const std::string & message)
 {
-	messageText1.setText(message.c_str());
+	crossThreadMutex.lock();
+	pendingMessage1Text = message;
+	pendingMessage1 = true;
+	crossThreadMutex.unlock();
 }
 
 void MessageBox::setMessage2(const std::string & message)
 {
-	messageText2.setText(message.c_str());
+	crossThreadMutex.lock();
+	pendingMessage2Text = message;
+	pendingMessage2 = true;
+	crossThreadMutex.unlock();
 }
 
 void MessageBox::setIcon(int typeIcons)
@@ -362,12 +397,54 @@ void MessageBox::setButtons(int typeButtons)
 
 void MessageBox::setProgress(f32 percent)
 {
-    progressImageColored.setSize(percent * 0.01f * progressImageBlack.getWidth(), progressImageColored.getHeight());
+	crossThreadMutex.lock();
+	pendingProgressVal = percent;
+	pendingProgress = true;
+	crossThreadMutex.unlock();
 }
 
 void MessageBox::setProgressBarInfo(const std::string & info)
 {
-	infoText.setText(info.c_str());
+	crossThreadMutex.lock();
+	pendingInfoText = info;
+	pendingInfo = true;
+	crossThreadMutex.unlock();
+}
+
+void MessageBox::updateEffects()
+{
+	GuiFrame::updateEffects();
+
+	// Apply everything queued by the setters. This runs from the element
+	// update chain on the render thread, so GuiText mutation is safe here.
+	crossThreadMutex.lock();
+	if(pendingTitle)
+	{
+		titleText.setText(pendingTitleText.c_str());
+		pendingTitle = false;
+	}
+	if(pendingMessage1)
+	{
+		messageText1.setText(pendingMessage1Text.c_str());
+		pendingMessage1 = false;
+	}
+	if(pendingMessage2)
+	{
+		messageText2.setText(pendingMessage2Text.c_str());
+		pendingMessage2 = false;
+	}
+	if(pendingInfo)
+	{
+		infoText.setText(pendingInfoText.c_str());
+		pendingInfo = false;
+	}
+	if(pendingProgress)
+	{
+		progressImageColored.setSize(pendingProgressVal * 0.01f * progressImageBlack.getWidth(),
+		                              progressImageColored.getHeight());
+		pendingProgress = false;
+	}
+	crossThreadMutex.unlock();
 }
 
 void MessageBox::UpdateButtons(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
