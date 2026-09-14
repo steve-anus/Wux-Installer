@@ -43,6 +43,13 @@ Error WudToc::load(const WuxContainer& container, const U8* key,
     if (partitionCount == 0)
         return Error::NotFound;
 
+    // The 32 KiB TOC sector holds exactly 240 entries; an untrusted
+    // partitionCount beyond that would read past the end of dec[].
+    const U32 kMaxPartitions =
+        (U32)((sizeof(dec) - fmt::kTocEntryOffset) / fmt::kTocEntrySize);
+    if (partitionCount > kMaxPartitions)
+        return Error::Truncated;
+
     for (U32 i = 0; i < partitionCount; ++i) {
         const U8* entry =
             dec + fmt::kTocEntryOffset + (size_t)i * fmt::kTocEntrySize;
