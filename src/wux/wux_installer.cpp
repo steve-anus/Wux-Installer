@@ -40,6 +40,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <cstdio>
 #include <vector>
 #include <string>
 #include <cstring>
@@ -55,6 +57,25 @@ const U64 kFstChunkSize = 0x10000;
 const U32 kMaxFstSize     = 0x1000000;  // 16 MiB
 const U32 kMaxH3ListSize  = 0x8000;     // one sector
 const U32 kMaxMetaFileSize = 0x100000;  // 1 MiB (TIK/TMD/CERT are << this)
+
+// Flat slack on top of the exact metadata byte sum in the free-space guard
+// (directory entries, FAT/FS overhead).
+const U64 kSpaceCheckSlackBytes = 2ULL * 1024 * 1024;
+
+// Human-readable size for error messages: GB when at least 1 GiB, else MB
+// (one decimal, same units style as the progress bar).
+std::string humanSize(U64 bytes) {
+    char buf[32];
+    int n;
+    if (bytes >= (1ULL << 30))
+        n = std::snprintf(buf, sizeof(buf), "%.1f GB", (double)bytes / 1073741824.0);
+    else
+        n = std::snprintf(buf, sizeof(buf), "%.1f MB", (double)bytes / 1048576.0);
+    // The worst case ("17179869184.0 GB") fits with room; clamp anyway.
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    return std::string(buf, (size_t)n);
+}
 
 // Read a whole file into `out`, in 64 KB chunks. Used only for small files (the 16-byte game.key);
 // the multi-GB .wux is streamed separately by WuxContainer, never read whole.
@@ -564,6 +585,55 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             U64 s = (titles[t].tmd.contents[i].encryptedFileSize + 15) & ~(U64)15;
             if (s == 0) s = titles[t].tmd.contents[i].encryptedFileSize;
             totalAppBytes += s;
+        }
+    }
+
+    // Size sanity before the space guard: on a real disc every content
+    // region sits disjointly inside the image, so the summed align16 sizes
+    // cannot exceed the image size (each file pads up by at most 15 bytes).
+    // A corrupt TMD claiming absurd sizes gets the right diagnosis here
+    // instead of a misleading "not enough free space", and needBytes below
+    // can never wrap.
+    if (totalAppBytes > container.uncompressedSize() +
+                        (U64)totalContents * 15) {
+        result.error = "content sizes exceed the image size (corrupt .wux)";
+        return Error::Truncated;
+    }
+
+    // Free-space guard, before anything is written: the .app payload plus
+    // the metadata files must fit on the volume holding outRoot. The
+    // metadata cost is known exactly here (the .tmd/.tik/.cert buffers are
+    // in memory and the .h3 bytes are cut out of gmH3Region, so the region
+    // size is an upper bound for them), plus a flat slack for filesystem
+    // overhead. statvfs uses the same POSIX layer as the rest of this
+    // module; whenever it cannot answer cleanly (call fails, or the field
+    // shape is implausible) the check is SKIPPED, never a false abort - a
+    // real filesystem failure then surfaces as the usual I/O error.
+    U64 metaBytes = 0;
+    for (size_t t = 0; t < titles.size(); ++t) {
+        if (titles[t].error) continue;
+        metaBytes += titles[t].tmdBytes.size() + titles[t].tik.size() +
+                     titles[t].cert.size() + titles[t].gmH3Region.size();
+    }
+    {
+        struct statvfs sv;
+        if (::statvfs(outRoot, &sv) == 0 && sv.f_blocks > 0 &&
+            (U64)sv.f_bavail <= (U64)sv.f_blocks) {
+            // f_bavail counts fragments (f_frsize); stacks that populate
+            // only f_bsize fall back to it before giving up.
+            U64 blk = sv.f_frsize ? (U64)sv.f_frsize : (U64)sv.f_bsize;
+            if (blk > 0) {
+                U64 freeBytes = (U64)sv.f_bavail * blk;
+                U64 needBytes =
+                    totalAppBytes + metaBytes + kSpaceCheckSlackBytes;
+                if (freeBytes < needBytes) {
+                    result.error = "not enough free space on the SD card: need ~" +
+                                   humanSize(needBytes) +
+                                   " for the extracted files, only " +
+                                   humanSize(freeBytes) + " free.";
+                    return Error::NoSpace;
+                }
+            }
         }
     }
     int doneContents = 0;

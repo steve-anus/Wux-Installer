@@ -40,6 +40,7 @@ enum class Error {
     DecryptError,    // AES failure (bad key or length not a multiple of 16)
     NotFound,        // file or partition not present
     MissingKey,      // game.key absent or not 16 bytes
+    NoSpace,         // not enough free space for the extracted files
     NotSupported
 };
 
@@ -55,6 +56,7 @@ inline const char* errorName(Error e) {
         case Error::DecryptError:  return "decrypt error";
         case Error::NotFound:      return "not found";
         case Error::MissingKey:    return "missing game.key";
+        case Error::NoSpace:       return "not enough free space";
         case Error::NotSupported:  return "not supported";
         default:                   return "unknown";
     }
