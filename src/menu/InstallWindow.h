@@ -20,10 +20,15 @@ public:
 	// askDelete: after the destination choice, ask whether the files in
 	// cleanupFiles (the .wux image and game.key) are deleted together with
 	// the install folders once the last title has installed (WUX flow).
+	// wuxFlow: titles outside the installable categories (e.g. the disc's
+	// rear.rpx dummy, 00050010-10060000) are skipped as non-fatal instead
+	// of failing the chain - they are the extraction's own output and the
+	// console already ships them on NAND.
 	InstallWindow(CFolderList * list, bool deleteAfterInstall = false,
 	              bool skipConfirm = false, bool askDelete = false,
 	              const std::vector<std::string> &cleanupFiles =
-	                  std::vector<std::string>());
+	                  std::vector<std::string>(),
+	              bool wuxFlow = false);
 	~InstallWindow();
 	
 	void startInstalling()
@@ -61,8 +66,17 @@ private:
 	bool deleteAfterInstall;
 	bool askDelete;        // WUX flow: show the delete-files prompt
 	bool deleteWuxFiles;   // set to true by the delete prompt answer (Yes)
+	bool wuxFlow;          // WUX flow: non-installable titles skip, not fail
+	int installedCount;    // titles actually installed this run
+	int skippedCount;      // titles skipped as non-installable (WUX flow)
+	bool lastWasSkip;      // suppress the 6 s countdown after a skip
+	std::string lastGoodName; // name of the last installed title
+	bool wuxDeleteFailed;  // .wux/game.key cleanup failed (success note)
 	std::vector<std::string> cleanupFiles;   // .wux + game.key paths
 	int target;
+
+	// Benign outcome for a skipped (non-installable) title in the WUX flow.
+	static const int kResultSkip = -100;
 	
 	enum
 	{

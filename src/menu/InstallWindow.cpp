@@ -27,6 +27,7 @@
 #include <coreinit/memory.h>
 #include <coreinit/ios.h>
 #include <coreinit/filesystem.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MCP_COMMAND_INSTALL_ASYNC   0x81
@@ -75,15 +76,32 @@ static bool deleteViaFsClient(const std::string &fsPath)
 	return st == FS_STATUS_OK || st == FS_STATUS_NOT_FOUND;
 }
 
+// The delete-stop boundary for an install folder path (shared by the
+// success tail and the WUX skip).
+static const char *stopAtFor(const std::string &path)
+{
+	if (path.find(SD_INSTALL_PATH) == 0)
+		return SD_INSTALL_PATH;
+	if (path.find(SD_WUDUMP_PATH) == 0)
+		return SD_WUDUMP_PATH;
+	return NULL;
+}
+
 InstallWindow::InstallWindow(CFolderList * list, bool deleteAfterInstall,
                              bool skipConfirm, bool askDelete,
-                             const std::vector<std::string> &cleanupFiles)
+                             const std::vector<std::string> &cleanupFiles,
+                             bool wuxFlow)
 	: GuiFrame(0, 0)
 	, CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff)
 	, folderList(list)
 	, deleteAfterInstall(deleteAfterInstall)
 	, askDelete(askDelete)
 	, deleteWuxFiles(false)
+	, wuxFlow(wuxFlow)
+	, installedCount(0)
+	, skippedCount(0)
+	, lastWasSkip(false)
+	, wuxDeleteFailed(false)
 	, cleanupFiles(cleanupFiles)
 {
 	mainWindow = Application::instance()->getMainWindow();
@@ -216,7 +234,7 @@ void InstallWindow::executeThread()
 	{
 		InstallProcess(pos, total);
 		
-		if(pos < total)
+		if(pos < total && !lastWasSkip)
 		{
 			int time = 6;
 			u64 startTime = OSGetTime();
@@ -236,8 +254,75 @@ void InstallWindow::executeThread()
 			
 			messageBox->messageCancelClicked.disconnect(this);
 		}
+		else if(pos < total && lastWasSkip)
+		{
+			// A skip shows no box: give the previous box fade time to settle
+			// before the next iteration's reload (the MessageBox is mutated
+			// from this thread while the GUI thread runs its fade handlers).
+			usleep(600 * 1000);
+		}
 		
 		pos++;
+	}
+
+	// A last title that was skipped left its "Installing..." box mid-fade;
+	// let it settle before the finalize reload (same guard as in the loop).
+	if(!canceled && lastWasSkip)
+		usleep(600 * 1000);
+
+	// Final box + cleanup once the whole chain is done. A hard failure or a
+	// cancel already showed its own box and set canceled, so nothing here
+	// runs in those cases (files stay on the SD card for a retry).
+	if(!canceled)
+	{
+		if(installedCount > 0)
+		{
+			// The .wux image and game.key (in /wudump) are removed after the
+			// last processed title, but only if something really installed
+			// (retry-friendly otherwise). common.key is never in
+			// cleanupFiles. A failed POSIX unlink (the same layer the fork's
+			// RemoveDirectory uses for /install) falls back to the coreinit
+			// FS client; both outcomes are logged for the hardware debug.
+			if(deleteWuxFiles)
+			{
+				for(size_t i = 0; i < cleanupFiles.size(); ++i)
+				{
+					if (unlink(cleanupFiles[i].c_str()) != 0 &&
+					    !deleteViaFsClient(cleanupFiles[i]))
+					{
+						wuxDeleteFailed = true;
+						log_printf("InstallWindow: could not delete %s",
+						           cleanupFiles[i].c_str());
+					}
+					else
+						log_printf("InstallWindow: deleted %s",
+						           cleanupFiles[i].c_str());
+				}
+			}
+
+			std::string note;
+			if(wuxDeleteFailed)
+				note = "Could not delete the .wux / game.key from the SD card, remove them manually.";
+			if(skippedCount > 0)
+			{
+				if(!note.empty())
+					note += " ";
+				note += strfmt("Skipped %d non-installable title(s) (already on the console).",
+				               skippedCount);
+			}
+
+			messageBox->reload("Successfully installed", lastGoodName, note,
+			                   MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
+			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+		}
+		else
+		{
+			// Every selected folder was a non-installable system title.
+			messageBox->reload("Install failed", "",
+			                   "No installable titles (all were system titles already on the console).",
+			                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+		}
 	}
 	
 	if(APD_enabled)
@@ -253,6 +338,8 @@ void InstallWindow::InstallProcess(int pos, int total)
 	
 	std::string title = fmt("Installing... (%d/%d)", pos, total);
 	std::string gameName = folderList->GetName(index);
+	
+	lastWasSkip = false;
 	
 	messageBox->reload(title, gameName, "", MessageBox::BT_NOBUTTON, MessageBox::IT_ICONINFORMATION, true, "0.0 %");
 	
@@ -309,14 +396,19 @@ void InstallWindow::InstallProcess(int pos, int total)
 			u32 titleIdHigh = mcpInstallInfo[0];
 			u32 titleIdLow = mcpInstallInfo[1];
 			bool spoofFiles = false;
-			if ((titleIdHigh == 00050010)
+			// The 0x was missing here: 00050010 is OCTAL (= 0x5008), so the
+			// Version.bin spoof never matched. Restores the fork's intent.
+			if ((titleIdHigh == 0x00050010)
 				&&(	   (titleIdLow == 0x10041000)     // JAP Version.bin
 					|| (titleIdLow == 0x10041100)     // USA Version.bin
 					|| (titleIdLow == 0x10041200)))   // EUR Version.bin
 			{
 				spoofFiles = true;
-				target = NAND;
 			}
+			// The Version.bin spoof forces NAND for this title only; writing
+			// the member would silently override the user's chosen
+			// destination for every later title in the run.
+			int effTarget = spoofFiles ? NAND : target;
 			
 			if (spoofFiles
 			   || (titleIdHigh == 0x0005000E)     // game update
@@ -324,7 +416,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 			   || (titleIdHigh == 0x0005000C)     // DLC
 			   || (titleIdHigh == 0x00050002))    // Demo
 			{
-				res = MCP_InstallSetTargetDevice(mcpHandle, (MCPInstallTarget)(target));
+				res = MCP_InstallSetTargetDevice(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
 					messageBox->reload("Install failed", gameName, fmt("MCP_InstallSetTargetDevice 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
@@ -333,7 +425,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 					result = -5;
 					break;
 				}
-				res = MCP_InstallSetTargetUsb(mcpHandle, (MCPInstallTarget)(target));
+				res = MCP_InstallSetTargetUsb(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
 					messageBox->reload("Install failed", gameName, fmt("MCP_InstallSetTargetUsb 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
@@ -349,7 +441,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				mcpInstallInfo[5] = (unsigned int)0;
 				
 				memset(mcpInstallPath, 0, MAX_INSTALL_PATH_LENGTH);
-				snprintf(mcpInstallPath, MAX_INSTALL_PATH_LENGTH, installFolder.c_str());
+				snprintf(mcpInstallPath, MAX_INSTALL_PATH_LENGTH, "%s", installFolder.c_str());
 				memset(mcpPathInfoVector, 0, 0x0C);
 				
 				mcpPathInfoVector->vaddr = mcpInstallPath;
@@ -387,7 +479,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				
 				if(installError != 0)
 				{
-					if ((installError == 0xFFFCFFE9) && (target == USB))
+					if ((installError == 0xFFFCFFE9) && (effTarget == USB))
 					{
 						messageBox->reload("Install failed", gameName, fmt("0x%08X access failed (no USB storage attached?)", installError), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						result = -8;
@@ -410,6 +502,29 @@ void InstallWindow::InstallProcess(int pos, int total)
 					}
 				}
 			}
+			else if(wuxFlow)
+			{
+				// Non-installable system title (e.g. the disc's rear.rpx
+				// dummy 00050010-10060000 - the console already ships it on
+				// NAND). In the WUX flow this is benign: it is our own
+				// extraction output, so clean it up like an installed folder
+				// and let the chain continue.
+				log_printf("InstallWindow: skipping non-installable title %08X-%08X (%s)",
+				           titleIdHigh, titleIdLow, gameName.c_str());
+				if(deleteAfterInstall)
+				{
+					std::string path = folderList->GetPath(index);
+					RemoveDirectoryAndEmptyParents(path.c_str(), stopAtFor(path));
+					struct stat st;
+					if (stat(path.c_str(), &st) == 0)
+						log_printf("InstallWindow: skipped folder still present: %s",
+						           path.c_str());
+				}
+				folderList->UnSelect(index);
+				++skippedCount;
+				lastWasSkip = true;
+				result = kResultSkip;
+			}
 			else
 			{
 				messageBox->reload("Install failed", gameName, "Not a game, game update, DLC, demo or version title", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
@@ -430,49 +545,30 @@ void InstallWindow::InstallProcess(int pos, int total)
 	
 	if(result >= 0)
 	{
-		bool wuxDeleteFailed = false;
+		++installedCount;
+		lastGoodName = gameName;
+
 		if(deleteAfterInstall)
 		{
 			std::string path = folderList->GetPath(index);
-			const char * stopAt = NULL;
-			if (path.find(SD_INSTALL_PATH) == 0)
-				stopAt = SD_INSTALL_PATH;
-			else if (path.find(SD_WUDUMP_PATH) == 0)
-				stopAt = SD_WUDUMP_PATH;
-
-			RemoveDirectoryAndEmptyParents(path.c_str(), stopAt);
-			
-			// The .wux image and game.key (in /wudump) are deleted only
-			// after the LAST title has installed, so a failure on a later
-			// title leaves them in place for a retry. A failed POSIX unlink
-			// falls back to the coreinit FS client (see deleteViaFsClient).
-			if(deleteWuxFiles && pos == total)
-			{
-				for(size_t i = 0; i < cleanupFiles.size(); ++i)
-				{
-					if (unlink(cleanupFiles[i].c_str()) != 0 &&
-					    !deleteViaFsClient(cleanupFiles[i]))
-						wuxDeleteFailed = true;
-				}
-			}
+			RemoveDirectoryAndEmptyParents(path.c_str(), stopAtFor(path));
 		}
 
-		if(pos == total)
-		{
-			// Tell the user if the optional cleanup could not be completed.
-			std::string note = wuxDeleteFailed
-				? "Could not delete the .wux / game.key from the SD card, remove them manually."
-				: "";
-			messageBox->reload("Successfully installed", gameName, note, MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
-			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
-		}
-		else
+		if(pos < total)
 		{
 			messageBox->reload("Successfully installed", gameName, "Starting next installation in 6 second(s)", MessageBox::BT_CANCEL, MessageBox::IT_ICONTRUE);
 			messageBox->messageCancelClicked.connect(this, &InstallWindow::OnInstallProcessCancel);
 		}
+		// The final box (and the .wux/game.key cleanup) is shown by
+		// executeThread once the whole loop is done, so it also covers a
+		// last folder that was skipped rather than installed.
 		
 		folderList->UnSelect(index);
+	}
+	else if(result == kResultSkip)
+	{
+		// Benign WUX-flow skip: handled where the title type was checked
+		// (folder cleaned, selection advanced, counters updated). No box.
 	}
 	else
 	{

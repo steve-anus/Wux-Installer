@@ -508,7 +508,7 @@ void MainWindow::OnWuxExtractFinished()
 			browserWindow = NULL;
 		}
 		installWindowOpen = true;
-		installWindow = new InstallWindow(folderList, false, true, true, wuxCleanupFiles);
+		installWindow = new InstallWindow(folderList, false, true, true, wuxCleanupFiles, true);
 		// The wux flow ends back on the plain main screen (no WUP browser),
 		// unlike the browser flow, so it gets its own close handler.
 		installWindow->installWindowClosed.connect(this, &MainWindow::OnWuxInstallWindowClosed);
