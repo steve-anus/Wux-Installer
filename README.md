@@ -4,7 +4,7 @@ A homebrew app for the Wii U that installs a game from a `.wux` disc image on
 your SD card. It also installs normal `.app` (WUP) folders you put on the card
 yourself. Titles are written to NAND or to a USB drive.
 
-It is based on [Fangal-Airbag]((https://github.com/Fangal-airbag)'s .wuhb port of [Wup Installer GX2](https://github.com/Fangal-Airbag/wup-installer-gx2) and was created with the help of [Maschell](https://github.com/Maschell)'s [Jnuslib](https://github.com/Maschell/JNUSLib).
+It is based on [Fangal-Airbag](https://github.com/Fangal-airbag)'s .wuhb port of [Wup Installer GX2](https://github.com/Fangal-Airbag/wup-installer-gx2) and was created with the help of [Maschell](https://github.com/Maschell)'s [Jnuslib](https://github.com/Maschell/JNUSLib).
 
 ## Get the app
 
