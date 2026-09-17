@@ -21,7 +21,7 @@
 
 namespace wux {
 
-// Streams a .wux disc image (Exzap compressed .wud) without materializing the
+// Streams a .wux disc image (compressed .wud) without materializing the
 // full image. The index table (up to ~3 MB) is held in memory; each read maps a
 // virtual offset to the on-disk sector array and reads straight to the caller.
 class WuxContainer {

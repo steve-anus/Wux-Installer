@@ -84,18 +84,6 @@ void CFolderList::UnSelect(int ind)
 	RemoveSequence(ind);
 }
 
-void CFolderList::SelectAll()
-{
-	if(!Folders.size())
-		return;
-	
-	for(u32 i = 0; i < Folders.size(); i++)
-	{
-		Folders.at(i)->selected = true;
-		AddSequence(i);
-	}
-}
-
 void CFolderList::UnSelectAll()
 {
 	if(!Folders.size())

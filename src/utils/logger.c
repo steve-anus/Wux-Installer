@@ -1,51 +1,73 @@
-#include <unistd.h>
 #include <stdarg.h>
 #include <stdbool.h>
-#include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
-#include <errno.h>
 #include "common/common.h"
 #include "logger.h"
+#include <coreinit/mutex.h>
 
 #ifdef DEBUG_LOGGER
 
-// SD-card log file: hardware rounds are debuggable without a
-// UDP listener. Opened once on the main thread at log_init (before any
-// worker exists); stdio's internal locking covers rare concurrent writes.
-// Appended to, never truncated: after a crash the normal flow is
-// relaunch-and-read-this-file, so the crashed run's trail must survive the
-// relaunch. Cross-run growth is bounded by the rotate in log_init.
+// SD-card log file: hardware rounds are debuggable without a UDP listener.
+// One file only - the card root stays tidy. Appended across relaunches so a
+// crashed run's tail survives, but once the byte cap is passed the same file
+// restarts from empty with a marker line: the newest entries (the useful
+// ones) always survive and the file stays small. Several threads write here,
+// so every FILE access runs under logMutex, including the restart's
+// close-and-reopen. The Wii U scheduler is co-operative, so this lock must
+// block (waiters enter a waiting state); a spin here could starve the holder.
+static const char *logPath = "fs:/vol/external01/wux_installer.log";
 static FILE *logFile = NULL;
+static OSMutex logMutex;
 // Gates every handler entry. Cleared first on deinit; the FILE itself is
 // then deliberately kept open (see log_deinit) so a writer already past the
 // check can never meet a freed FILE. A volatile flag cannot order a close -
 // not closing is what makes the window safe.
 static volatile bool logFileActive = false;
-// Written-byte tally; the log is capped so a runaway loop cannot fill the card.
+// Bytes currently on the card for this file, counted from the file itself at
+// init and kept live by each write; on overflow the file restarts, so a
+// runaway loop can neither fill the card nor bury its newest lines.
 #define LOG_MAX_BYTES 524288
-// Cross-run growth bound: several capped runs may accumulate before the
-// file rotates to .log.old (one generation kept, next run starts fresh).
-#define LOG_ROTATE_BYTES (4 * LOG_MAX_BYTES)
 static long logBytes = 0;
-static bool logCapNoteWritten = false;
+
+static void logLock(void)
+{
+    OSLockMutex(&logMutex);
+}
+
+static void logUnlock(void)
+{
+    OSUnlockMutex(&logMutex);
+}
 
 static void LogFileHandler(const char *msg)
 {
     if (!logFileActive || logFile == NULL)
         return;
 
+    logLock();
+    if (!logFileActive || logFile == NULL)
+    {
+        logUnlock();
+        return;
+    }
+
     if (logBytes > LOG_MAX_BYTES)
     {
-        if (!logCapNoteWritten)
+        // Restart the same file: newest lines win, still exactly one log.
+        fclose(logFile);
+        logFile = fopen(logPath, "w");
+        if (logFile == NULL)
         {
-            logCapNoteWritten = true;
-            int n = fprintf(logFile, "log capped at 512 KiB\n");
-            if (n > 0)
-                logBytes += n;
-            fflush(logFile);
+            logFileActive = false;
+            logUnlock();
+            WHBLogPrint("SD log disabled: reopen failed");
+            return;
         }
-        return;
+        logBytes = 0;
+        int m = fprintf(logFile, "--- earlier entries dropped (log restarted at cap) ---\n");
+        if (m > 0)
+            logBytes += m;
+        fflush(logFile);
     }
 
     int n = fprintf(logFile, "%s\n", msg);
@@ -53,31 +75,32 @@ static void LogFileHandler(const char *msg)
         logBytes += n;
     // Keep the trail even if the app dies later.
     fflush(logFile);
+    logUnlock();
 }
 
-void log_init()
+void log_init(void)
 {
-    static const char *logPath = "fs:/vol/external01/wux_installer.log";
+    OSInitMutex(&logMutex);
     WHBLogUdpInit();
+    logLock();
     logFile = fopen(logPath, "a");
     if (logFile != NULL)
     {
-        // If many runs piled the file up past the rotate bound, move one
-        // generation to .log.old and start appending fresh.
-        if (fseek(logFile, 0, SEEK_END) == 0 && ftell(logFile) > (long)LOG_ROTATE_BYTES)
+        // Seed the tally with the file's real on-card size: relaunches
+        // cannot pile the log up, because the first write that passes the
+        // cap restarts the file (bounded at cap plus one line).
+        long sz = 0;
+        if (fseek(logFile, 0, SEEK_END) == 0)
         {
-            fclose(logFile);
-            rename(logPath, "fs:/vol/external01/wux_installer.log.old");
-            logFile = fopen(logPath, "a");
+            long t = ftell(logFile);
+            if (t > 0)
+                sz = t;
         }
-        if (logFile != NULL)
-        {
-            logBytes = 0;
-            logCapNoteWritten = false;
-            logFileActive = true;
-            WHBAddLogHandler(LogFileHandler);
-        }
+        logBytes = sz;
+        logFileActive = true;
+        WHBAddLogHandler(LogFileHandler);
     }
+    logUnlock();
 }
 
 void log_deinit(void)
@@ -86,10 +109,14 @@ void log_deinit(void)
     logFileActive = false;
     // No fclose: a worker thread can still be inside LogFileHandler here
     // (nothing joins it first), and fclose frees the FILE it writes to.
-    // Flushing is safe under newlib's stdio locking; the descriptor is
-    // reclaimed at process exit, and the run's log already ends complete.
+    // The lock below keeps the flush out of a restart's close-and-reopen
+    // window; flushing is safe under newlib's stdio locking, and the
+    // descriptor is reclaimed at process exit, so the run's log ends
+    // complete.
+    logLock();
     if (logFile != NULL)
         fflush(logFile);
+    logUnlock();
 }
 
 void log_print(const char *str)

@@ -55,9 +55,9 @@ inline const char* errorName(Error e) {
         case Error::AllocError:    return "alloc error";
         case Error::DecryptError:  return "decrypt error";
         case Error::NotFound:      return "not found";
-        case Error::MissingKey:    return "missing game.key";
+        case Error::MissingKey:    return "key not usable";
         case Error::NoSpace:       return "not enough free space";
-        case Error::NotSupported:  return "not supported";
+        case Error::NotSupported:  return "a same-named file exists on the card";
         default:                   return "unknown";
     }
 }

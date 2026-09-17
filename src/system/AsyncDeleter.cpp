@@ -95,8 +95,7 @@ void AsyncDeleter::pushForDelete(AsyncDeleter::Element *e)
     {
         // The delete worker is unavailable (out of memory, or already torn
         // down). Freeing the element here is not safe: the fade and OK
-        // handlers - CloseBrowser's caller, the browser close handler, the
-        // progress-box fade, the result-box OK - run from inside the element's
+        // handlers - the progress-box fade, the result-box OK - run from inside the element's
         // own signal emission, so its member function is still on the call
         // stack and a free makes the emit return into destroyed memory. Other
         // callers push objects that are not emitting, but this fallback cannot
@@ -116,6 +115,33 @@ void AsyncDeleter::pushForDelete(AsyncDeleter::Element *e)
     }
 
     inst->deleteMutex.lock();
+    // Identity guard: the same element may be queued only once. A double
+    // emit from one button press (touch + A-proxy answering in the same
+    // frame) used to queue the same element twice and free it twice.
+    {
+        std::queue<Element*> probe = inst->deleteElements;
+        while(!probe.empty())
+        {
+            if(probe.front() == e)
+            {
+                inst->deleteMutex.unlock();
+                log_printf("AsyncDeleter: element already pending in delete queue, skip\n");
+                return;
+            }
+            probe.pop();
+        }
+        probe = inst->realDeleteElements;
+        while(!probe.empty())
+        {
+            if(probe.front() == e)
+            {
+                inst->deleteMutex.unlock();
+                log_printf("AsyncDeleter: element already handed to delete thread, skip\n");
+                return;
+            }
+            probe.pop();
+        }
+    }
     inst->deleteElements.push(e);
     inst->deleteMutex.unlock();
 }

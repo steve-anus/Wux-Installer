@@ -36,6 +36,8 @@
 #include "wux/tmd.h"
 #include "wux/aes_cbc.h"
 #include "wux/ticket.h"
+#include "fs/fs_utils.h"
+#include "utils/logger.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -86,7 +88,13 @@ Error readWhole(const char* path, std::vector<U8>& out,
                 U64 maxBytes = 0,
                 bool* tooLarge = nullptr) {
     int fd = ::open(path, O_RDONLY);
-    if (fd < 0) return Error::IoError;
+    if (fd < 0)
+    {
+        // Missing vs. fault, decided via stat: this platform's POSIX layer
+        // does not set errno reliably, so stat is the referee.
+        struct stat probe;
+        return (::stat(path, &probe) != 0) ? Error::NotFound : Error::IoError;
+    }
     out.clear();
     // Heap buffer: this runs on the 192 KiB worker thread's stack (WuxExtractThread)
     std::vector<U8> buf(0x10000);
@@ -123,7 +131,11 @@ Error parseKeyFile(const char* path, std::vector<U8>& key,
     bool tooLarge = false;
     Error e = readWhole(path, raw, 4096, &tooLarge);
     if (e != Error::Ok) {
-        if (tooLarge && reason) *reason = "file too large";
+        if (reason) {
+            if (tooLarge) *reason = "file too large";
+            else if (e == Error::NotFound) *reason = "file not found";
+            else if (e == Error::IoError) *reason = "read error";
+        }
         return e;
     }
     std::vector<U8> clean;
@@ -134,6 +146,18 @@ Error parseKeyFile(const char* path, std::vector<U8>& key,
     }
     key.clear();
     if (clean.size() == 16) {
+        // Ambiguity guard: 16 characters that are all hex digits are far
+        // more likely a truncated 32-char hex key than a raw key whose bytes
+        // happen to all fall in the hex-digit ranges. Reject and say exactly
+        // what to do about it.
+        bool allHex = true;
+        for (size_t i = 0; i < clean.size(); ++i)
+            if (hexVal(clean[i]) < 0) { allHex = false; break; }
+        if (allHex) {
+            key.clear();
+            if (reason) *reason = "16 hex characters - looks like a truncated 32-char hex key (enter all 32 characters, or save the raw 16 bytes)";
+            return Error::MissingKey;
+        }
         key.assign(clean.begin(), clean.end());
         return Error::Ok;
     }
@@ -142,12 +166,17 @@ Error parseKeyFile(const char* path, std::vector<U8>& key,
         for (int i = 0; i < 16; ++i) {
             int hi = hexVal(clean[2 * i]);
             int lo = hexVal(clean[2 * i + 1]);
-            if (hi < 0 || lo < 0) { key.clear(); return Error::MissingKey; }
+            if (hi < 0 || lo < 0) {
+                key.clear();
+                if (reason) *reason = "32 characters but not valid hex";
+                return Error::MissingKey;
+            }
             key[i] = (U8)((hi << 4) | lo);
         }
         return Error::Ok;
     }
     key.clear();
+    if (reason) *reason = "expected 16 raw bytes or a 32-character hex string, got " + std::to_string(clean.size()) + " byte(s)";
     return Error::MissingKey;
 }
 
@@ -185,9 +214,13 @@ Error writeWhole(const char* path, const U8* data, size_t len) {
 // rather than errno, since the console's mkdir may not set errno reliably.
 Error ensureDir(const char* path) {
     struct stat st;
-    if (::stat(path, &st) == 0) return Error::Ok;      // already present
-    if (::mkdir(path, 0777) == 0) return Error::Ok;     // created
-    return ::stat(path, &st) == 0 ? Error::Ok : Error::IoError;
+    bool exists = (::stat(path, &st) == 0);
+    // A same-named regular file is not "the directory already exists":
+    // accepting it here would surface later as a misleading i/o error.
+    if (exists && !S_ISDIR(st.st_mode)) return Error::NotSupported;
+    if (::mkdir(path, 0777) == 0) return Error::Ok;                    // created
+    if (::stat(path, &st) != 0) return Error::IoError;
+    return S_ISDIR(st.st_mode) ? Error::Ok : Error::NotSupported;
 }
 
 // Progress state shared with the writer loop (see extract()). The callback
@@ -411,9 +444,9 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         std::string keyWhy;
         e = parseKeyFile(keyPath, key, &keyWhy);
         if (e != Error::Ok) {
-            result.error = std::string("read game.key: ") +
+            result.error = std::string("read game.key (") + keyPath + "): " +
                            (keyWhy.empty() ? std::string(errorName(e)) : keyWhy) +
-                           " (must be 16 raw bytes or a 32-char hex string)";
+                           " - expected 16 raw bytes or a 32-character hex string";
             return e;
         }
 
@@ -425,9 +458,9 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         std::string commonWhy;
         e = parseKeyFile(commonKeyPath, commonKey, &commonWhy);
         if (e != Error::Ok) {
-            result.error = std::string("read common.key: ") +
+            result.error = std::string("read common.key (") + commonKeyPath + "): " +
                            (commonWhy.empty() ? std::string(errorName(e)) : commonWhy) +
-                           " (must be 16 raw bytes or a 32-char hex string)";
+                           " - expected 16 raw bytes or a 32-character hex string";
             return e;
         }
 
@@ -688,6 +721,35 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 }
             }
         }
+        // Fresh extraction: clear any previous output for these title folders
+        // before writing, so a re-run can never merge stale files into the new
+        // extract or hit same-named files mid-stream. Runs after the free-space
+        // guard on purpose: the old data still occupies its blocks while the
+        // guard checks, and a failed removal fails only that title.
+        for (size_t t = 0; t < titles.size(); ++t) {
+            TitleData& td = titles[t];
+            if (td.error) continue;
+            struct stat st;
+            if (::stat(td.outDir.c_str(), &st) != 0) continue;   // nothing to clear
+            if (!S_ISDIR(st.st_mode)) {
+                // A file squats on the folder name; clear it, fail the title
+                // if the removal does not stick.
+                ::unlink(td.outDir.c_str());
+                if (::stat(td.outDir.c_str(), &st) == 0) {
+                    td.error = true;
+                    td.code = Error::IoError;
+                    td.errorText = "cannot clear the file squatting on " + td.outDir;
+                    continue;
+                }
+            } else if (RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0) {
+                td.error = true;
+                td.code = Error::IoError;
+                td.errorText = "cannot remove the previous " + td.outDir +
+                               "; delete that folder and retry";
+                continue;
+            }
+        }
+
         int doneContents = 0;
 
         // Progress state for the writer loop: the callback fires per 32 KB chunk,
@@ -716,6 +778,12 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 td.errorText = std::string("create ") + td.outDir + ": " + errorName(dirErr);
                 continue;
             }
+            bool dirCreated = true;   // partial output to clean on any later failure
+            auto clearPartial = [&]() {
+                if (dirCreated &&
+                    RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0)
+                    log_printf("WUX: could not clear partial folder %s", td.outDir.c_str());
+            };
 
             int total = (int)td.tmd.contents.size();
             for (int i = 0; i < total; ++i) {
@@ -785,25 +853,28 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
 
                 doneContents++;
             }
-            if (td.error) continue;
+            if (td.error) { clearPartial(); continue; }
 
             // 9. Decrypted metadata.
             e = writeWhole((td.outDir + "/title.tmd").c_str(), td.tmdBytes.data(), td.tmdBytes.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.tmd: ") + errorName(e);
+                clearPartial();
                 continue;
             }
             e = writeWhole((td.outDir + "/title.tik").c_str(), td.tik.data(), td.tik.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.tik: ") + errorName(e);
+                clearPartial();
                 continue;
             }
             e = writeWhole((td.outDir + "/title.cert").c_str(), td.cert.data(), td.cert.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.cert: ") + errorName(e);
+                clearPartial();
                 continue;
             }
 

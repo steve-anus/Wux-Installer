@@ -38,7 +38,7 @@ const char * WuxFlow::stateName(State s)
     switch(s)
     {
         case State::Idle:           return "Idle";
-        case State::BrowserInstall: return "BrowserInstall";
+        case State::WupInstall:     return "WupInstall";
         case State::WuxExtract:     return "WuxExtract";
         case State::WuxInstall:     return "WuxInstall";
         case State::WuxErrorBox:    return "WuxErrorBox";

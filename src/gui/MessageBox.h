@@ -29,6 +29,10 @@ public:
 	virtual ~MessageBox();
 	
 	void reload(std::string title, std::string message1, std::string message2, int typeButtons = BT_NOBUTTON, int typeIcons = IT_NOICON, bool progressBar = false, std::string pbInfo = " ");
+	// Worker-thread-safe companion of reload(): stages the payload; the
+	// reload itself (fade effects, signal connections) is applied on the
+	// render thread inside updateEffects().
+	void stageReload(std::string title, std::string message1, std::string message2, int typeButtons = BT_NOBUTTON, int typeIcons = IT_NOICON, bool progressbar = false, std::string pbInfo = " ");
 	void setTitle(const std::string & title);
 	void setMessage1(const std::string & message);
 	void setMessage2(const std::string & message);
@@ -43,13 +47,16 @@ public:
 	sigslot::signal2<GuiElement *, int> messageOkClicked;
 	sigslot::signal2<GuiElement *, int> messageYesClicked;
 	sigslot::signal2<GuiElement *, int> messageNoClicked;
+	// Fired at the end of MessageBox::updateEffects(), on the render thread.
+	// Owners use it to apply GUI-side work queued by their worker (button
+	// signal wiring) in the same frame the staged reload landed.
+	sigslot::signal0<> effectsTick;
 	
 	enum ButtonType
     {
 		BT_NOBUTTON = -1,
 		BT_OK,
 		BT_CANCEL,
-		BT_OKCANCEL,
 		BT_YESNO,
 		BT_DEST
     };
@@ -76,19 +83,31 @@ public:
 private:
     void OnOkButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
     {
-        messageOkClicked(this, MR_OK);
+			if(answered)
+				return;
+			answered = true;
+			messageOkClicked(this, MR_OK);
     }
 	void OnCancelButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
     {
-        messageCancelClicked(this, MR_CANCEL);
+			if(answered)
+				return;
+			answered = true;
+			messageCancelClicked(this, MR_CANCEL);
     }
 	void OnYesButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
     {
-        messageYesClicked(this, MR_YES);
+			if(answered)
+				return;
+			answered = true;
+			messageYesClicked(this, MR_YES);
     }
 	void OnNoButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
     {
-        messageNoClicked(this, MR_NO);
+			if(answered)
+				return;
+			answered = true;
+			messageNoClicked(this, MR_NO);
     }
 	
 	void setIcon(int typeIcons);
@@ -130,6 +149,10 @@ private:
     GuiButton DPADButtons;
 	
 	int selectedButtonDPAD;
+	// Single-shot answer latch: one physical press can reach a button twice
+	// in a frame (A-proxy + touch). The first handler answers; the echo must
+	// not emit a second decision. Cleared when a box has fully faded in.
+	bool answered;
 	
 	typedef struct
     {
@@ -162,6 +185,7 @@ private:
 	bool pendingMessage2;
 	bool pendingInfo;
 	bool pendingProgress;
+	bool pendingReload;
 	std::string pendingTitleText;
 	std::string pendingMessage1Text;
 	std::string pendingMessage2Text;

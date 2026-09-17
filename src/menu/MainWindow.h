@@ -32,7 +32,6 @@
 // file that includes this header.
 class CVideo;
 class CFolderList;
-class BrowserWindow;
 class ErrorViewer;
 class GuiButton;
 class GuiController;
@@ -101,6 +100,11 @@ public:
     void update(GuiController *controller);
     void updateEffects();
 
+    //! Polls the extraction worker once per frame regardless of controller
+    //! input. The main loop calls it every frame; without it, a finished
+    //! extraction only transitions out when some controller reports input.
+    void updateFlow();
+
     void lockGUI()
     {
         guiMutex.lock();
@@ -113,27 +117,31 @@ public:
 private:
     void SetupMainView(void);
 	void SetDrcHeader(void);
-	void SetBrowserWindow(void);
 
-	//! Takes the folder browser out of the draw tree and queues it for
-	//! deletion. Single owner of that transition: the paths that used to
-	//! null the member directly left the object alive in the tree, and the
-	//! ones that deleted it by hand duplicated the removal steps.
-	void CloseBrowser(void);
-	
-	void OnInstallButtonClicked(GuiElement *element);
-	void OnBrowserCloseEffectFinish(GuiElement *element);
-	void OnInstallWindowClosed(GuiElement *element);
 	void OnWuxInstallWindowClosed(GuiElement *element);
-	//! Shared tail of the two install-window close handlers: releases the
-	//! flow and restores the home button. The browser flow rebuilds the
-	//! folder browser, the wux flow returns to the plain start screen.
-	void FinishInstallFlow(bool rebuildBrowser);
+	void OnWupInstallWindowClosed(GuiElement *element);
+	//! Shared tail of the install-window close handlers: releases the flow and
+	//! restores the home button. Returns to the plain start screen; the folder
+	//! browser is gone, so nothing is rebuilt.
+	void FinishInstallFlow(void);
 	void OnOpenEffectFinish(GuiElement *element);
 	void OnWuxInstallClicked(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void OnWupInstallClicked(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	//! Whole-screen navigation proxy handler: dpad moves the highlight between
+	//! the two buttons, A starts the highlighted flow, so one press is one action.
+	void OnMainNavClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	//! Highlights exactly one of the two entry buttons and records it as the
+	//! A-target. Used by the dpad handlers and by direct taps, so the A
+	//! highlight always matches what the user used last.
+	void SetMainFocus(bool focusWux);
+	//! The single re-entrancy gate for each flow entry point (touch or A).
+	void TriggerWuxInstall();
+	void TriggerWupInstall();
 	void OnWuxMessageBoxClick(GuiElement *element, int ok);
 	void RunWuxInstall();
+	void RunWupInstall();
 	void ShowWuxResult(const std::string &msg, bool ok);
+	void ShowWupResult(const std::string &msg, bool ok);
 	void StartWuxExtraction(const std::string &wuxPath, const std::string &keyPath,
 	                          const std::string &commonKeyPath);
 	void OnWuxExtractFinished();
@@ -156,16 +164,34 @@ private:
     bool pointerValid[4];
 	
 	CFolderList * folderList;
-    BrowserWindow * browserWindow;
     ErrorViewer * errorViewer;
 
     CMutex guiMutex;
 
     GuiButton *wuxButton;
     GuiText *wuxLabel;
-    GuiTrigger wuxTrigger;
     GuiTrigger wuxTouchTrigger;
     GuiImage *wuxButtonImage;
+    GuiImage *wuxButtonImageHi;   // focused / pointer-over look
+
+    GuiButton *wupButton;
+    GuiText *wupLabel;
+    GuiTrigger wupTouchTrigger;
+    GuiImage *wupButtonImage;
+    GuiImage *wupButtonImageHi;
+
+    //! Whole-screen, imageless proxies (see OnMainNavClick). A, up and down
+    //! each get their OWN button because a GuiButton stores a single
+    //! clickedTrigger: triggers sharing a button let a held direction swallow
+    //! the opposite press. None of the three has an image, so none draws; the
+    //! two visible buttons keep only touch triggers.
+    GuiButton *mainUpButton;    // up trigger: highlights the wux button
+    GuiButton *mainDownButton;  // down trigger: highlights the wup button
+    GuiButton *mainAButton;     // A: activates the focused button
+    GuiTrigger mainAtrigger;
+    GuiTrigger mainUpTrigger;
+    GuiTrigger mainDownTrigger;
+    bool mainFocusWux;   // true = wux highlighted, false = wup highlighted
 
     //! Whole install flow: one State value plus the flow's resources, where
     //! the re-entrancy guards used to be three independent booleans. Owned

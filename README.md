@@ -1,14 +1,10 @@
 # Wux Installer
 
 A homebrew app for the Wii U that installs a game from a `.wux` disc image on
-your SD card. It also installs normal `.app` (WUP) folders you put on the card
-yourself. Titles are written to NAND or to a USB drive.
+your SD card. It also installs `.app` (WUP) files you put on the card.  
+Titles are written to NAND or to a USB drive.
 
-It is based on [Fangal-Airbag](https://github.com/Fangal-airbag)'s .wuhb port of [Wup Installer GX2](https://github.com/Fangal-Airbag/wup-installer-gx2) and was created with the help of [Maschell](https://github.com/Maschell)'s [Jnuslib](https://github.com/Maschell/JNUSLib).
-
-## Get the app
-
-Download the `.wuhb` from the Releases page of this repository or build it from source.
+It is based on [Fangal-Airbag](https://github.com/Fangal-airbag)'s .wuhb port of [Wup Installer GX2](https://github.com/Fangal-Airbag/wup-installer-gx2) and was created with the help of [Maschell](https://github.com/Maschell)'s [JNUSLib](https://github.com/Maschell/JNUSLib).
 
 ## Put the files on the SD card
 
@@ -20,20 +16,20 @@ in it:
 `common.key`      : your console's common key, the same for every game. 16 bytes raw, or 32 hex characters 
 
 `wudump` is the only place it looks for these. The app also uses a folder named
-`install` in the card root for the files it extracts, and creates it if missing.
+`install` in the card root for wup files. If you have wup files already, place them here under a subfolder to install them, so: /install/<foldername>/
 
 ## How to install
 
-1. Press `install wux` with the `A` button
+1. Press `install wux` or `install wup` with the `A` button
 2. Wait
 3. Install to NAND or USB
-4. Select delete or don't files after installation
+4. Select delete or don't delete files after installation
 5. Wait more
 6. Done
 
 ## Build from source
 
-Needs Linux with devkitPro installed. Besides devkitPPC and `wut`, the link line
+Needs Linux with devkitPro installed. Besides devkitPPC and wut, the link line
 uses these devkitPro packages:
 
 ```

@@ -30,9 +30,9 @@ class WuxExtractThread;
  * transition methods below now enforce by construction - was:
  *
  *   Idle            <=> !wuxBusy && !installWindowOpen
- *   BrowserInstall  <=> !wuxBusy &&  installWindowOpen
+ *   WupInstall      <=> !wuxBusy &&  installWindowOpen (manual /install install)
  *   WuxExtract      <=>  wuxBusy &&  extraction worker running
- *   WuxInstall      <=>  wuxBusy &&  installWindowOpen
+ *   WuxInstall      <=>  wuxBusy &&  installWindowOpen (started by the wux flow)
  *   WuxErrorBox     <=>  wuxBusy &&  result/error box awaiting the OK click
  *
  * Every state but Idle blocks both entry points, so one test covers the
@@ -53,7 +53,7 @@ public:
     enum class State
     {
         Idle,             // start screen; both entry points live
-        BrowserInstall,   // folder-browser install window open
+        WupInstall,       // manual /install WUP install window open
         WuxExtract,       // extraction worker running, progress box shown
         WuxInstall,       // install window open, started by the wux flow
         WuxErrorBox       // result/error box awaiting the OK click
@@ -81,8 +81,8 @@ public:
     void force(State newState);
 
     // ---- transitions ----------------------------------------------------
-    bool beginBrowserInstall() { return transition(State::Idle, State::BrowserInstall); }
-    bool beginExtraction()     { return transition(State::Idle, State::WuxExtract); }
+    bool beginWupInstall()   { return transition(State::Idle, State::WupInstall); }
+    bool beginExtraction()   { return transition(State::Idle, State::WuxExtract); }
     void extractionFinished(bool installStarted)
     {
         force(installStarted ? State::WuxInstall : State::WuxErrorBox);

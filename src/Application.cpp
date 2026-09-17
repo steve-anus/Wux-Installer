@@ -50,8 +50,7 @@ Application::Application()
 	, bgMusic(NULL)
 	, video(NULL)
 	, mainWindow(NULL)
-    , fontSystem(NULL)
-	, exitDisabled(false)
+	, fontSystem(NULL)
 {
 	controller[0] = new VPadController(GuiTrigger::CHANNEL_1);
 	controller[1] = new WPadController(GuiTrigger::CHANNEL_2);
@@ -255,6 +254,11 @@ void Application::executeThread(void)
 			continue;
 		
 		mainWindow->lockGUI();
+		//! Poll the install flow FIRST, every frame: a finished extraction
+		//! thread must be able to release the UI even when no controller
+		//! reported input this frame (MainWindow::updateFlow).
+		mainWindow->updateFlow();
+
 		//! Read out inputs
 		for(int i = 0; i < 5; i++)
 		{

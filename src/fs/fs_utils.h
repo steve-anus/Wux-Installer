@@ -10,7 +10,9 @@ extern "C" {
 int LoadFileToMem(const char *filepath, u8 **inbuffer, u32 *size);
 
 int RemoveDirectory(const char *path);
-void RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt);
+// Returns 0 when the target is gone afterwards (removed or already
+// absent), -1 when it could not be removed (logged).
+int RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt);
 
 #ifdef __cplusplus
 }

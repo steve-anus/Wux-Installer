@@ -48,7 +48,6 @@ class CFolderList
 		bool IsSelected(int ind);
 		void Select(int ind);
 		void UnSelect(int ind);
-		void SelectAll();
 		void UnSelectAll();
 		int GetFirstSelected();
 		

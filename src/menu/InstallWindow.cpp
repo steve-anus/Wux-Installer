@@ -52,6 +52,18 @@ static void IosInstallCallback(IOSError errorCode, void * priv_data)
 	installCompleted = 1;
 }
 
+// True if s[pos..] contains at least one character that is neither '/' nor
+// '.': the tail after a boundary slash is a real name, not "", "/", "." or
+// "..", which path normalization could fold back onto the volume root.
+// A name that merely starts with dots (".hidden") passes.
+static bool hasRealName(const std::string &s, size_t pos)
+{
+	for (; pos < s.size(); pos++)
+		if (s[pos] != '/' && s[pos] != '.')
+			return true;
+	return false;
+}
+
 // The POSIX layer on the Wii U (wut's newlib glue) removes files through the
 // legacy coreinit FSARemove API, which can fail on files that were not
 // created through that layer (e.g. the .wux image and game.key, which the
@@ -62,11 +74,33 @@ static void IosInstallCallback(IOSError errorCode, void * priv_data)
 static bool deleteViaFsClient(const std::string &fsPath)
 {
 	// newlib path "fs:/vol/external01/..." -> coreinit FS path "sd:/...".
+	// The FS client mounts the volume root at "sd:/", so the whole
+	// "fs:/vol/external01" volume prefix must go, not just the "fs:" scheme
+	// (leaving it produced "sd:/vol/external01/...", which never resolves).
 	char path[MAX_INSTALL_PATH_LENGTH];
-	if (fsPath.compare(0, 3, "fs:") == 0)
+	static const char volPrefix[] = "fs:/vol/external01";
+	const size_t volPrefixLen = sizeof(volPrefix) - 1;
+	// Only ever delete a path whose tail below the volume root is a real
+	// name: a bare "fs:/vol/external01", "fs:/vol/external01/", "fs:/" or a
+	// dot-tail (".../.." normalization) would otherwise reach FSRemove at
+	// the card root. A prefix match needs a '/' boundary AND a real name
+	// after it (hasRealName); volume-shaped paths are honored only through
+	// the first branch. Every other shape is refused with a log, never
+	// passed raw.
+	if (fsPath.compare(0, volPrefixLen, volPrefix) == 0 &&
+	    fsPath.size() > volPrefixLen + 1 && fsPath[volPrefixLen] == '/' &&
+	    hasRealName(fsPath, volPrefixLen + 1))
+		snprintf(path, sizeof(path), "sd:%s", fsPath.c_str() + volPrefixLen);
+	else if (fsPath.compare(0, 3, "fs:") == 0 && fsPath.size() > 4 &&
+	         fsPath[3] == '/' && hasRealName(fsPath, 4) &&
+	         fsPath.compare(0, volPrefixLen, volPrefix) != 0)
 		snprintf(path, sizeof(path), "sd:%s", fsPath.c_str() + 3);
 	else
-		snprintf(path, sizeof(path), "%s", fsPath.c_str());
+	{
+		log_printf("InstallWindow: deleteViaFsClient refused malformed path: %s",
+		           fsPath.c_str());
+		return false;
+	}
 	
 	FSClient client;
 	if (FSAddClient(&client, FS_ERROR_FLAG_NONE) != FS_STATUS_OK)
@@ -79,8 +113,15 @@ static bool deleteViaFsClient(const std::string &fsPath)
 	if (FSDelClient(&client, FS_ERROR_FLAG_NONE) != FS_STATUS_OK)
 		log_printf("InstallWindow: FSDelClient failed after FSRemove");
 	
-	// FS_STATUS_NOT_FOUND = already gone, which is the desired end state.
-	return st == FS_STATUS_OK || st == FS_STATUS_NOT_FOUND;
+	// FS_STATUS_NOT_FOUND = already gone: the desired end state for a
+	// cleanup delete, but logged, so a card that was pulled and remounted
+	// empty cannot silently "succeed" here.
+	if (st == FS_STATUS_NOT_FOUND)
+	{
+		log_printf("InstallWindow: already gone via FS client: %s", fsPath.c_str());
+		return true;
+	}
+	return st == FS_STATUS_OK;
 }
 
 // The delete-stop boundary for an install folder path (shared by the
@@ -115,6 +156,8 @@ InstallWindow::InstallWindow(CFolderList * list, const InstallOptions & options)
 	, wuxDeleteFailed(false)
 	, cleanupFiles(options.cleanupFiles)
 	, finalNote(options.finalNote)
+	, boxClosing(false)
+	, deleteFoldersFailed(false)
 {
 	mainWindow = Application::instance()->getMainWindow();
 	
@@ -143,7 +186,7 @@ InstallWindow::InstallWindow(CFolderList * list, const InstallOptions & options)
 	{
 		messageBox = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONEXCLAMATION, false);
 		messageBox->setTitle("No content selected.");
-		messageBox->setMessage1("Return to folder browser.");
+		messageBox->setMessage1("Nothing was selected to install.");
 		messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
 	}
 	
@@ -158,7 +201,8 @@ InstallWindow::InstallWindow(CFolderList * list, const InstallOptions & options)
 	blackBg = new GuiImage(1280, 720, (GX2Color){0, 0, 0, 255});
 	drcFrame->append(blackBg);
 	drcFrame->append(messageBox);
-	
+
+	messageBox->effectsTick.connect(this, &InstallWindow::OnBoxTick);
 	mainWindow->append(drcFrame);
 }
 
@@ -191,17 +235,49 @@ void InstallWindow::OnDestinationChoice(GuiElement * element, int choice)
 	messageBox->messageYesClicked.disconnect(this);
 	messageBox->messageNoClicked.disconnect(this);
 	
+	if(target == USB)
+	{
+		// Preflight: an unreachable USB drive otherwise surfaces mid-chain,
+		// after earlier titles may already have installed. Asking MCP to accept
+		// the USB target now turns that into one clear upfront error.
+		u32 probe = MCP_Open();
+		int resDev = -1, resUsb = -1;
+		if(probe != 0)
+		{
+			resDev = MCP_InstallSetTargetDevice(probe, (MCPInstallTarget)USB);
+			resUsb = MCP_InstallSetTargetUsb(probe, (MCPInstallTarget)USB);
+			MCP_Close(probe);
+		}
+		if(probe == 0 || resDev != 0 || resUsb != 0)
+		{
+			log_printf("InstallWindow: USB pre-check failed (handle 0x%08X dev %d usb %d)",
+			           probe, resDev, resUsb);
+			messageBox->reload("Install failed", "",
+			                   "No USB storage detected. Connect the drive and start the install again.",
+			                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+			return;
+		}
+	}
+	
 	if(askDelete)
 	{
-		// WUX flow: ask whether the .wux image, game.key and the extracted
-		// .app folders are deleted from the SD card after a successful
-		// install. The deletion itself runs after the last title has
-		// installed (see InstallProcess).
-		std::string fileName = cleanupFiles.empty() ? std::string()
-			: cleanupFiles[0].substr(cleanupFiles[0].find_last_of('/') + 1);
+		// .wux flow: image + game.key + extracted folders (removed after
+		// the last title). Manual flow: its /install folders, on success.
+		std::string question;
+		if(wuxFlow)
+		{
+			std::string fileName = cleanupFiles.empty() ? std::string()
+				: cleanupFiles[0].substr(cleanupFiles[0].find_last_of('/') + 1);
+			question = strfmt("Delete %s, game.key and extracted files from the SD card after a successful install?",
+			                  fileName.c_str());
+		}
+		else
+		{
+			question = "Delete the installed WUP folders from the SD card after a successful install?";
+		}
 		messageBox->reload("Delete files after install?",
-			strfmt("Delete %s, game.key and extracted files from the SD card after a successful install?",
-			    fileName.c_str()),
+			question,
 			"", MessageBox::BT_YESNO, MessageBox::IT_ICONQUESTION);
 		messageBox->messageYesClicked.connect(this, &InstallWindow::OnDeleteChoice);
 		messageBox->messageNoClicked.connect(this, &InstallWindow::OnDeleteChoice);
@@ -216,13 +292,14 @@ void InstallWindow::OnDeleteChoice(GuiElement * element, int choice)
 	messageBox->messageYesClicked.disconnect(this);
 	messageBox->messageNoClicked.disconnect(this);
 	
-	// Yes: delete the install folders after each title (deleteAfterInstall)
-	// and the .wux image + game.key after the last title (deleteWuxFiles).
+	// Yes: deleteAfterInstall for both flows; deleteWuxFiles only for the
+	// .wux flow (a manual run has no cleanupFiles, never deletes /wudump).
 	// No: keep everything on the SD card.
 	if(choice == MessageBox::MR_YES)
 	{
 		deleteAfterInstall = true;
-		deleteWuxFiles = true;
+		if(wuxFlow)
+			deleteWuxFiles = true;
 	}
 	
 	startInstalling();
@@ -230,7 +307,18 @@ void InstallWindow::OnDeleteChoice(GuiElement * element, int choice)
 
 void InstallWindow::executeThread()
 {
-	Application::instance()->exitDisable();
+	// The ctor creates this thread suspended; only a confirmed install resumes it
+	// via startInstalling(). Bail out unless that happened, so the entry point can
+	// never run for a window dismissed before confirmation. (In today's build a
+	// thread still suspended at ~CThread is woken by the destructor's resume-before-
+	// join but dispatches to the base CThread::executeThread(); this flag keeps the
+	// invariant explicit and holds if that resume is ever hoisted out.)
+	if(!startRequested)
+		return;
+
+	log_printf("InstallWindow: install thread entered (confirmed install) selected=%d\n",
+	           folderList->GetSelectedCount());
+
 	OSEnableHomeButtonMenu(FALSE);
 	
 	canceled = false;
@@ -266,7 +354,7 @@ void InstallWindow::executeThread()
 				usleep(100 * 1000);
 			}
 			
-			messageBox->messageCancelClicked.disconnect(this);
+			queueBoxOp(OP_DISCONNECT_CANCEL);
 		}
 		else if(pos < total && lastWasSkip)
 		{
@@ -289,6 +377,19 @@ void InstallWindow::executeThread()
 	// runs in those cases (files stay on the SD card for a retry).
 	if(!canceled)
 	{
+		// Join the skipped folder names for the box (full per-folder detail
+		// is already in the SD log at each skip).
+		auto joinSkipped = [this]() {
+			std::string s;
+			for(size_t i = 0; i < skippedNames.size(); ++i)
+			{
+				if(i)
+					s += ", ";
+				s += skippedNames[i];
+			}
+			return s;
+		};
+
 		if(installedCount > 0)
 		{
 			// The .wux image and game.key (in /wudump) are removed after the
@@ -317,12 +418,26 @@ void InstallWindow::executeThread()
 			std::string note;
 			if(wuxDeleteFailed)
 				note = "Could not delete the .wux / game.key from the SD card, remove them manually.";
+			if(deleteFoldersFailed)
+			{
+				if(!note.empty())
+					note += " ";
+				note += "Some extracted folders could not be removed from the card, delete them manually.";
+			}
 			if(skippedCount > 0)
 			{
 				if(!note.empty())
 					note += " ";
-				note += strfmt("Skipped %d non-installable title(s) (already on the console).",
-				               skippedCount);
+				// Manual runs name what was skipped (the folders are the
+				// user's own placements); extraction output is ours, so a
+				// count suffices.
+				std::string names = wuxFlow ? std::string() : joinSkipped();
+				if(names.empty())
+					note += strfmt("Skipped %d non-installable title(s).",
+					               skippedCount);
+				else
+					note += strfmt("Skipped %d non-installable title(s): %s.",
+					               skippedCount, names.c_str());
 			}
 			if(!finalNote.empty())
 			{
@@ -335,7 +450,7 @@ void InstallWindow::executeThread()
 				log_printf("InstallWindow: finalize note: %s", note.c_str());
 
 			// Keep the box readable: the message2 line gets at most ~120
-			// characters; the full note is always in the SD log (above).
+			// characters; each skip also has its own full log line above.
 			std::string boxNote = note;
 			if(boxNote.size() > 120)
 			{
@@ -343,17 +458,26 @@ void InstallWindow::executeThread()
 				boxNote += "...";
 			}
 
-			messageBox->reload("Successfully installed", lastGoodName, boxNote,
+			messageBox->stageReload("Successfully installed", lastGoodName, boxNote,
 			                   MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
-			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+			queueBoxOp(OP_CONNECT_OK);
 		}
 		else
 		{
-			// Every selected folder was a non-installable system title.
-			messageBox->reload("Install failed", "",
-			                   "No installable titles (all were system titles already on the console).",
+			// Every selected folder was a non-installable title.
+			std::string msg = "No installable titles found (games, updates, DLC, demos and version titles install).";
+			if(!wuxFlow && !skippedNames.empty())
+			{
+				msg += " Not installable: " + joinSkipped();
+				if(msg.size() > 120)
+				{
+					msg.resize(117);
+					msg += "...";
+				}
+			}
+			messageBox->stageReload("Install failed", "", msg,
 			                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
-			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+			queueBoxOp(OP_CONNECT_OK);
 		}
 	}
 	
@@ -361,7 +485,6 @@ void InstallWindow::executeThread()
 		enableAutoPowerDown();
 	
 	OSEnableHomeButtonMenu(TRUE);
-	Application::instance()->exitEnable();
 }
 
 void InstallWindow::InstallProcess(int pos, int total)
@@ -373,7 +496,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 	
 	lastWasSkip = false;
 	
-	messageBox->reload(title, gameName, "", MessageBox::BT_NOBUTTON, MessageBox::IT_ICONINFORMATION, true, "0.0 %");
+	messageBox->stageReload(title, gameName, "", MessageBox::BT_NOBUTTON, MessageBox::IT_ICONINFORMATION, true, "0.0 %");
 	
 	/////////////////////////////
 	// install process
@@ -398,7 +521,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 	unsigned int mcpHandle = MCP_Open();
 	if(mcpHandle == 0)
 	{
-		messageBox->reload("Install failed", gameName, "Failed to open MCP.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+		messageBox->stageReload("Install failed", gameName, "Failed to open MCP.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 		
 		result = -1;
 	}
@@ -413,13 +536,13 @@ void InstallWindow::InstallProcess(int pos, int total)
 		{
 			if(!mcpInstallInfo || !mcpInstallPath || !mcpPathInfoVector)
 			{
-				messageBox->reload("Install failed", gameName, "Could not allocate memory.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+				messageBox->stageReload("Install failed", gameName, "Could not allocate memory.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 				result = -2;
 				break;
 			}
 			
 			std::string installFolder = folderList->GetPath(index);
-			// MCP reads through the app's own FS mount: the browser's
+			// MCP reads through the app's own FS mount: the
 			// "fs:/vol/external01/" prefix becomes "/vol/app_sd/". Compare
 			// the prefix instead of blindly erasing 19 bytes; a path that
 			// does not match cannot be installed by this flow.
@@ -428,7 +551,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 			if (installFolder.size() <= fsPrefixLen ||
 			    installFolder.compare(0, fsPrefixLen, fsPrefix) != 0)
 			{
-				messageBox->reload("Install failed", gameName, "Folder path is not under the SD card mount.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+				messageBox->stageReload("Install failed", gameName, "Folder path is not under the SD card mount.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 				result = -12;
 				break;
 			}
@@ -441,7 +564,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 			if(res != 0)
 			{
 				//__os_snprintf(errorText1, sizeof(errorText1), "Error: MCP_InstallGetInfo 0x%08X", MCP_GetLastRawError());
-				messageBox->reload(installFolder, gameName, "Confirm complete WUP files are in the folder.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+				messageBox->stageReload(installFolder, gameName, "Confirm complete WUP files are in the folder.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 				result = -3;
 				break;
 			}
@@ -473,7 +596,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				res = MCP_InstallSetTargetDevice(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallSetTargetDevice 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->stageReload("Install failed", gameName, strfmt("MCP_InstallSetTargetDevice 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					//if (installToUsb)
 					//	__os_snprintf(errorText2, sizeof(errorText2), "Possible USB HDD disconnected or failure");
 					result = -5;
@@ -482,7 +605,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				res = MCP_InstallSetTargetUsb(mcpHandle, (MCPInstallTarget)(effTarget));
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallSetTargetUsb 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->stageReload("Install failed", gameName, strfmt("MCP_InstallSetTargetUsb 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					//if (installToUsb)
 					//	__os_snprintf(errorText2, sizeof(errorText2), "Possible USB HDD disconnected or failure");
 					result = -6;
@@ -504,7 +627,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				res = IOS_IoctlvAsync(mcpHandle, MCP_COMMAND_INSTALL_ASYNC, 1, 0, mcpPathInfoVector, IosInstallCallback, (void *)(uintptr_t)myGen);
 				if(res != 0)
 				{
-					messageBox->reload("Install failed", gameName, strfmt("MCP_InstallTitleAsync 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+					messageBox->stageReload("Install failed", gameName, strfmt("MCP_InstallTitleAsync 0x%08X", MCP_GetLastRawError()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 					result = -7;
 					break;
 				}
@@ -525,7 +648,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 				{
 					if(canceled)
 					{
-						messageBox->reload("Install failed", gameName, "The install was stopped.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						messageBox->stageReload("Install failed", gameName, "The install was stopped.", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						result = -11;
 						abandonedInstall = true;
 						installGen.fetch_add(1); // drop the still-pending callback
@@ -565,7 +688,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 					                (OSTicksToMilliseconds(OSGetTime() - loopStart) > 1800000);
 					if(stalled || noRecord)
 					{
-						messageBox->reload("Install failed", gameName,
+						messageBox->stageReload("Install failed", gameName,
 						                   stalled ? "The install made no progress for 5 minutes."
 						                           : "The install never reported progress.",
 						                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
@@ -582,56 +705,53 @@ void InstallWindow::InstallProcess(int pos, int total)
 				{
 					if ((installError == 0xFFFCFFE9) && (effTarget == USB))
 					{
-						messageBox->reload("Install failed", gameName, strfmt("0x%08X access failed (no USB storage attached?)", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						messageBox->stageReload("Install failed", gameName, strfmt("0x%08X access failed (no USB storage attached?)", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						result = -8;
 					}
 					else
 					{
 						//__os_snprintf(errorText1, sizeof(errorText1), "Error: install error code 0x%08X", installError);
 						if (installError == 0xFFFBF446 || installError == 0xFFFBF43F)
-							messageBox->reload("Install failed", gameName, "Possible missing or bad title.tik file", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, "Possible missing or bad title.tik file", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if (installError == 0xFFFBF441)
-							messageBox->reload("Install failed", gameName, "Possible incorrect console for DLC title.tik file", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, "Possible incorrect console for DLC title.tik file", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if (installError == 0xFFFCFFE4)
-							messageBox->reload("Install failed", gameName, "Possible not enough memory on target device", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, "Possible not enough memory on target device", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if (installError == 0xFFFFF825)
-							messageBox->reload("Install failed", gameName, "Possible bad SD card.  Reformat (32k blocks) or replace", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, "Possible bad SD card.  Reformat (32k blocks) or replace", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if ((installError & 0xFFFF0000) == 0xFFFB0000)
-							messageBox->reload("Install failed", gameName, "Verify WUP files are correct & complete. DLC/E-shop require Sig Patch", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, "Verify WUP files are correct & complete. DLC/E-shop require Sig Patch", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else
-							messageBox->reload("Install failed", gameName, strfmt("Install failed with error code 0x%08X", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+							messageBox->stageReload("Install failed", gameName, strfmt("Install failed with error code 0x%08X", (unsigned)installError.load()), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						
 						result = -9;
 					}
 				}
 			}
-			else if(wuxFlow)
+			else
 			{
-				// Non-installable system title (e.g. the disc's rear.rpx
-				// dummy 00050010-10060000 - the console already ships it on
-				// NAND). In the WUX flow this is benign: it is our own
-				// extraction output, so clean it up like an installed folder
-				// and let the chain continue.
+				// Non-whitelist category (e.g. the disc's rear.rpx dummy):
+				// benign in both flows - log, count, continue the chain. A
+				// skipped manual folder was never installed, so it is never
+				// removed; cleanup of skipped folders applies only to
+				// deleting extraction runs.
 				log_printf("InstallWindow: skipping non-installable title %08X-%08X (%s)",
 				           titleIdHigh, titleIdLow, gameName.c_str());
-				if(deleteAfterInstall)
+				if(wuxFlow && deleteAfterInstall)
 				{
 					std::string path = folderList->GetPath(index);
-					RemoveDirectoryAndEmptyParents(path.c_str(), stopAtFor(path));
-					struct stat st;
-					if (stat(path.c_str(), &st) == 0)
-						log_printf("InstallWindow: skipped folder still present: %s",
+					if(RemoveDirectoryAndEmptyParents(path.c_str(), stopAtFor(path)) != 0)
+					{
+						deleteFoldersFailed = true;
+						log_printf("InstallWindow: could not remove skipped folder %s",
 						           path.c_str());
+					}
 				}
 				folderList->UnSelect(index);
 				++skippedCount;
+				skippedNames.push_back(gameName);
 				lastWasSkip = true;
 				result = kResultSkip;
-			}
-			else
-			{
-				messageBox->reload("Install failed", gameName, "Not a game, game update, DLC, demo or version title", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
-				result = -4;
 			}
 		}
 		while(0);
@@ -668,13 +788,27 @@ void InstallWindow::InstallProcess(int pos, int total)
 		if(deleteAfterInstall)
 		{
 			std::string path = folderList->GetPath(index);
-			RemoveDirectoryAndEmptyParents(path.c_str(), stopAtFor(path));
+			const char *stop = stopAtFor(path);
+			if(!wuxFlow && (stop == NULL || strcmp(stop, SD_INSTALL_PATH) != 0))
+			{
+				// A manual run may only ever remove its own /install
+				// folders; anything else the list might hold is refused.
+				deleteFoldersFailed = true;
+				log_printf("InstallWindow: refused to remove non-/install folder %s",
+				           path.c_str());
+			}
+			else if(RemoveDirectoryAndEmptyParents(path.c_str(), stop) != 0)
+			{
+				deleteFoldersFailed = true;
+				log_printf("InstallWindow: could not remove installed folder %s",
+				           path.c_str());
+			}
 		}
 
 		if(pos < total)
 		{
-			messageBox->reload("Successfully installed", gameName, "Starting next installation in 6 second(s)", MessageBox::BT_CANCEL, MessageBox::IT_ICONTRUE);
-			messageBox->messageCancelClicked.connect(this, &InstallWindow::OnInstallProcessCancel);
+			messageBox->stageReload("Successfully installed", gameName, "Starting next installation in 6 second(s)", MessageBox::BT_CANCEL, MessageBox::IT_ICONTRUE);
+			queueBoxOp(OP_CONNECT_CANCEL);
 		}
 		// The final box (and the .wux/game.key cleanup) is shown by
 		// executeThread once the whole loop is done, so it also covers a
@@ -684,15 +818,74 @@ void InstallWindow::InstallProcess(int pos, int total)
 	}
 	else if(result == kResultSkip)
 	{
-		// Benign WUX-flow skip: handled where the title type was checked
-		// (folder cleaned, selection advanced, counters updated). No box.
+		// Benign skip (both flows): handled where the title type was
+		// checked (selection advanced, counters updated; deleting
+		// extraction runs also cleaned the folder). No box.
 	}
 	else
 	{
-		messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+		queueBoxOp(OP_CONNECT_OK);
 		
 		canceled = true;
 		folderList->UnSelectAll();
+	}
+}
+
+void InstallWindow::queueBoxOp(int op)
+{
+	// Callable from the install worker: the box's sigslot signals are
+	// single-threaded and GUI-owned, so wiring is queued and applied by
+	// OnBoxTick on the render thread.
+	opMutex.lock();
+	pendingBoxOps.push_back(op);
+	opMutex.unlock();
+}
+
+void InstallWindow::OnBoxTick()
+{
+	std::vector<int> ops;
+	opMutex.lock();
+	ops.swap(pendingBoxOps);
+	opMutex.unlock();
+
+	if(boxClosing)
+		return;
+
+	for(size_t i = 0; i < ops.size(); ++i)
+	{
+		switch(ops[i])
+		{
+			case OP_CONNECT_CANCEL:
+				messageBox->messageCancelClicked.connect(this, &InstallWindow::OnInstallProcessCancel);
+				break;
+			case OP_DISCONNECT_CANCEL:
+				messageBox->messageCancelClicked.disconnect(this);
+				break;
+			case OP_CONNECT_OK:
+				messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+				break;
+		}
+	}
+}
+
+void InstallWindow::startInstalling()
+{
+	if(isCreated())
+	{
+		// Only a confirmed install sets this flag and starts the thread; resumeThread
+		// must stay the thread's only other starter, and executeThread() checks this
+		// flag first, so the install entry never runs unless the user confirmed.
+		startRequested = true;
+		resumeThread();
+	}
+	else if(!startEscape)
+	{
+		// Thread creation failed (~CThread logged it): this window can never
+		// install, so run the normal close tail instead of leaving the owning
+		// flow waiting on a dead window.
+		startEscape = true;
+		log_printf("InstallWindow: startInstalling on an uncreated window; closing it");
+		OnCloseWindow(NULL, 0);
 	}
 }
 
@@ -712,6 +905,9 @@ void InstallWindow::OnCloseWindow(GuiElement * element, int val)
 
 void InstallWindow::OnWindowClosed(GuiElement *element)
 {
+	// The window is closing: stop applying worker-queued box wiring.
+	boxClosing = true;
+	messageBox->effectsTick.disconnect(this);
 	messageBox->effectFinished.disconnect(this);
 	installWindowClosed(this);
 	
@@ -722,10 +918,4 @@ void InstallWindow::OnOpenEffectFinish(GuiElement *element)
 {
 	element->effectFinished.disconnect(this);
 	element->clearState(GuiElement::STATE_DISABLED);
-}
-
-void InstallWindow::OnCloseEffectFinish(GuiElement *element)
-{
-	remove(element);
-	AsyncDeleter::pushForDelete(element);
 }

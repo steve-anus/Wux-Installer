@@ -142,14 +142,20 @@ int RemoveDirectory(const char *path)
 	return r;
 }
 
-void RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt)
+int RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt)
 {
 	if (RemoveDirectory(path) != 0)
-		return;
+	{
+		struct stat st;
+		if (stat(path, &st) != 0)
+			return 0; // gone anyway (raced removal): the wanted end state
+		log_printf("RemoveDirectoryAndEmptyParents: could not remove %s", path);
+		return -1;
+	}
 
 	// Ancestors may only be walked with an explicit stop boundary.
 	if (!stopAt)
-		return;
+		return 0;
 
 	char parent[512];
 	strncpy(parent, path, sizeof(parent));
@@ -170,4 +176,5 @@ void RemoveDirectoryAndEmptyParents(const char *path, const char *stopAt)
 		if (rmdir(parent) != 0)
 			break;
 	}
+	return 0;
 }

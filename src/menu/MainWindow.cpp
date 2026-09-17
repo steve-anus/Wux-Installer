@@ -18,7 +18,6 @@
 
 #include "MainWindow.h"
 #include "Application.h"
-#include "BrowserWindow.h"
 #include "ErrorViewer.h"
 #include "InstallWindow.h"
 #include "WuxExtractThread.h"
@@ -43,12 +42,18 @@ MainWindow::MainWindow(int w, int h)
 	, versionText("V1.0")
 {
 	folderList = NULL;
-	// Initialized here, not only by SetBrowserWindow(): CloseBrowser() reads
-	// the pointer, and SetupMainView() runs from this constructor.
-	browserWindow = NULL;
 	wuxButton = NULL;
 	wuxLabel = NULL;
 	wuxButtonImage = NULL;
+	wuxButtonImageHi = NULL;
+	wupButton = NULL;
+	wupLabel = NULL;
+	wupButtonImage = NULL;
+	wupButtonImageHi = NULL;
+	mainUpButton = NULL;
+	mainDownButton = NULL;
+	mainAButton = NULL;
+	mainFocusWux = true;
 	
 	for(int i = 0; i < 4; i++)
 	{
@@ -77,14 +82,6 @@ MainWindow::~MainWindow()
 	// from - hence children first.
 	wux.shutdown();
 
-	// A browser still owned here means it never reached a delete path (both
-	// the fade handler and CloseBrowser() clear the pointer).
-	if (browserWindow != NULL)
-	{
-		delete browserWindow;
-		browserWindow = NULL;
-	}
-
 	while(!tvElements.empty())
 	{
 		// Read the pointer, unlink, then free: deleting first leaves a
@@ -108,6 +105,14 @@ MainWindow::~MainWindow()
 	delete wuxButton;
 	delete wuxLabel;
 	delete wuxButtonImage;
+	delete wuxButtonImageHi;
+	delete wupButton;
+	delete wupLabel;
+	delete wupButtonImage;
+	delete wupButtonImageHi;
+	delete mainUpButton;
+	delete mainDownButton;
+	delete mainAButton;
 
 	if(folderList != NULL)
 		delete folderList;
@@ -146,13 +151,10 @@ void MainWindow::update(GuiController *controller)
 {
 	//! dont read behind the initial elements in case one was added
 	
-	// The extraction worker runs on another thread. When it terminates, run
-	// the flow transition on this (GUI) thread. update() is called once per
-	// controller per frame; OnWuxExtractFinished releases the worker
-	// pointer, so the transition runs exactly once.
-	if (wux.state() == WuxFlow::State::WuxExtract && wux.extractDone())
-		OnWuxExtractFinished();
-	
+	// NOTE: the extraction-complete poll moved to updateFlow(); update()
+	// runs only for controllers that reported input this frame, which must
+	// not gate the flow (see updateFlow's comment).
+
 	if(controller->chan & GuiTrigger::CHANNEL_1)
 	{
 		u32 drcSize = drcElements.size();
@@ -183,6 +185,16 @@ void MainWindow::update(GuiController *controller)
 	}
 
 	errorViewer->calc();
+}
+
+void MainWindow::updateFlow()
+{
+	// Runs every frame from the main loop, independent of controller input:
+	// a finished extraction must release the progress box even with every
+	// controller asleep. OnWuxExtractFinished clears the worker pointer, so
+	// the transition still happens exactly once.
+	if (wux.state() == WuxFlow::State::WuxExtract && wux.extractDone())
+		OnWuxExtractFinished();
 }
 
 void MainWindow::drawDrc(CVideo *video)
@@ -231,28 +243,93 @@ void MainWindow::SetupMainView()
 	currentDrcFrame->setState(GuiElement::STATE_DISABLED);
 	currentDrcFrame->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
 	
-	SetBrowserWindow();
 	SetDrcHeader();
 
-	// "Install WUX": extract a .wux from /wudump into /install/<TITLEID>/ and
+	// Two stacked buttons, neither of which answers A on its own. Three
+	// whole-screen imageless proxy buttons (built below) own the A, up and
+	// down triggers, so a single press activates only the focused button and
+	// the two flows can never race. Each visible button keeps a
+	// position-based touch trigger, so tapping it directly still works.
+
+	// "install wux": extract a .wux from /wudump into /install/<TITLEID>/ and
 	// hand the result to the installer.
 	wuxButtonImage = new GuiImage(600, 120, (GX2Color){ 42, 159, 217, 255 });
+	wuxButtonImageHi = new GuiImage(600, 120, (GX2Color){ 120, 200, 255, 255 });
 	wuxLabel = new GuiText("install wux", 48, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
 	wuxLabel->setAlignment(ALIGN_CENTERED);
 	wuxButton = new GuiButton(600, 120);
 	wuxButton->setImage(wuxButtonImage);
+	wuxButton->setImageOver(wuxButtonImageHi);
 	wuxButton->setLabel(wuxLabel);
 	wuxButton->setAlignment(ALIGN_CENTERED);
-	wuxButton->setPosition(0, 0);
-	wuxTrigger.setTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A);
-	wuxTrigger.setClickEverywhere(true);
+	wuxButton->setPosition(0, 90);
+	// Non-selectable so pointer hover never sets STATE_OVER: STATE_SELECTED
+	// (moved by the dpad) is then the only highlight, and hover can never leave
+	// a stale button lit. Tap-to-activate still works (the click gate tests
+	// isInside directly).
+	wuxButton->setSelectable(false);
 	wuxTouchTrigger.setTrigger(GuiTrigger::CHANNEL_1, GuiTrigger::VPAD_TOUCH);
-	wuxButton->setTrigger(&wuxTrigger);
 	wuxButton->setTrigger(&wuxTouchTrigger);
 	wuxButton->clicked.connect(this, &MainWindow::OnWuxInstallClicked);
 	currentDrcFrame->append(wuxButton);
-	// An empty /install is a normal starting state. The user extracts a .wux via the "Install WUX" button, which rebuilds the browser
-	// afterwards (see RunWuxInstall). Do not show an error or exit here.
+
+	// "install wup": install every WUP folder already present under /install.
+	wupButtonImage = new GuiImage(600, 120, (GX2Color){ 42, 159, 217, 255 });
+	wupButtonImageHi = new GuiImage(600, 120, (GX2Color){ 120, 200, 255, 255 });
+	wupLabel = new GuiText("install wup", 48, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+	wupLabel->setAlignment(ALIGN_CENTERED);
+	wupButton = new GuiButton(600, 120);
+	wupButton->setImage(wupButtonImage);
+	wupButton->setImageOver(wupButtonImageHi);
+	wupButton->setLabel(wupLabel);
+	wupButton->setAlignment(ALIGN_CENTERED);
+	wupButton->setPosition(0, -90);
+	wupButton->setSelectable(false);
+	wupTouchTrigger.setTrigger(GuiTrigger::CHANNEL_1, GuiTrigger::VPAD_TOUCH);
+	wupButton->setTrigger(&wupTouchTrigger);
+	wupButton->clicked.connect(this, &MainWindow::OnWupInstallClicked);
+	currentDrcFrame->append(wupButton);
+
+	// Input proxies. A whole-screen, imageless button answers A and a second one
+	// answers the dpad; they are SEPARATE GuiButtons on purpose: a button stores
+	// only one clickedTrigger, so A and dpad on a single button would let a held
+	// dpad direction swallow an A press. Neither button has
+	// an image, so both draw nothing while still receiving input.
+	mainAtrigger.setTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A);
+	mainAtrigger.setClickEverywhere(true);
+	mainUpTrigger.setTrigger(GuiTrigger::CHANNEL_ALL,
+	                         GuiTrigger::BUTTON_UP | GuiTrigger::STICK_L_UP);
+	mainUpTrigger.setClickEverywhere(true);
+	mainDownTrigger.setTrigger(GuiTrigger::CHANNEL_ALL,
+	                           GuiTrigger::BUTTON_DOWN | GuiTrigger::STICK_L_DOWN);
+	mainDownTrigger.setClickEverywhere(true);
+
+	mainUpButton = new GuiButton(width, height);
+	mainUpButton->setAlignment(ALIGN_CENTERED);
+	mainUpButton->setPosition(0, 0);
+	mainUpButton->setSelectable(false);
+	mainUpButton->setTrigger(&mainUpTrigger);
+	mainUpButton->clicked.connect(this, &MainWindow::OnMainNavClick);
+	currentDrcFrame->append(mainUpButton);
+
+	mainDownButton = new GuiButton(width, height);
+	mainDownButton->setAlignment(ALIGN_CENTERED);
+	mainDownButton->setPosition(0, 0);
+	mainDownButton->setSelectable(false);
+	mainDownButton->setTrigger(&mainDownTrigger);
+	mainDownButton->clicked.connect(this, &MainWindow::OnMainNavClick);
+	currentDrcFrame->append(mainDownButton);
+
+	mainAButton = new GuiButton(width, height);
+	mainAButton->setAlignment(ALIGN_CENTERED);
+	mainAButton->setPosition(0, 0);
+	mainAButton->setSelectable(false);
+	mainAButton->setTrigger(&mainAtrigger);
+	mainAButton->clicked.connect(this, &MainWindow::OnMainNavClick);
+	currentDrcFrame->append(mainAButton);
+
+	// Default highlight: the wux button.
+	SetMainFocus(true);
 
 	append(currentDrcFrame);
 }
@@ -280,116 +357,26 @@ void MainWindow::SetDrcHeader()
 	currentDrcFrame->append(&headerFrame);
 }
 
-void MainWindow::CloseBrowser()
-{
-	if (browserWindow == NULL)
-		return;
-
-	currentDrcFrame->remove(browserWindow);
-	AsyncDeleter::pushForDelete(browserWindow);
-	browserWindow = NULL;
-}
-
-void MainWindow::SetBrowserWindow()
-{
-	// Release the browser before the folder list is read again. Its buttons
-	// were built from the previous scan, so a refreshed CFolderList would be
-	// indexed out of range by the stale count it cached at construction.
-	CloseBrowser();
-	
-	if(folderList == NULL)
-	{
-		folderList = new CFolderList();
-		folderList->Get();
-	}
-	
-	if(!folderList->GetCount())
-	{
-		delete folderList;
-		folderList = NULL;
-		return;
-	}
-	
-	browserWindow = new BrowserWindow(920, height, folderList);
-	browserWindow->setAlignment(ALIGN_LEFT | ALIGN_MIDDLE);
-	browserWindow->setPosition(50, 0);
-	browserWindow->installButtonClicked.connect(this, &MainWindow::OnInstallButtonClicked);
-	browserWindow->setState(GuiElement::STATE_DISABLED);
-	browserWindow->setEffect(EFFECT_FADE, 10, 255);
-	browserWindow->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
-	currentDrcFrame->append(browserWindow);
-}
-
-void MainWindow::OnInstallButtonClicked(GuiElement *element)
-{
-	// Idle -> BrowserInstall is the only gate: it refuses every other state,
-	// which covers a running wux flow (extraction, install or result box) as
-	// well as a browser install already in flight. The wux flow selects and
-	// deletes folders behind the user's back, so it must never be overlaid.
-	// A refusal leaves the browser untouched, so the click can be retried.
-	if (!wux.beginBrowserInstall())
-		return;
-
-	InstallWindow::InstallOptions options;
-	options.deleteAfterInstall = browserWindow->DeleteAfterInstallEnabled();
-	InstallWindow *window = new InstallWindow(folderList, options);
-	if (!window->isCreated())
-	{
-		// Thread creation failed (OOM): drop the window and leave the browser
-		// fully intact - it has not been faded or disabled at this point.
-		delete window;
-		wux.flowFinished();
-		log_printf("MainWindow: install thread could not be created");
-		return;
-	}
-	window->installWindowClosed.connect(this, &MainWindow::OnInstallWindowClosed);
-
-	// Only tear the browser down once the install window is known good.
-	browserWindow->setEffect(EFFECT_FADE, -10, 255);
-	browserWindow->setState(GuiElement::STATE_DISABLED);
-	browserWindow->effectFinished.connect(this, &MainWindow::OnBrowserCloseEffectFinish);
-}
-
-void MainWindow::OnBrowserCloseEffectFinish(GuiElement *element)
-{
-	//! remove element from draw list and push to delete queue
-	currentDrcFrame->remove(element);
-
-	// The delete queue owns the object from here. Clearing the member is what
-	// keeps CloseBrowser() from queueing the same browser twice.
-	if (element == browserWindow)
-		browserWindow = NULL;
-
-	AsyncDeleter::pushForDelete(element);
-}
-void MainWindow::OnInstallWindowClosed(GuiElement *element)
-{
-	// The BROWSER flow's install window closed. Rebuild the browser: the
-	// install may have deleted folders, so the list is refreshed first and
-	// the window rebuilt from it.
-	FinishInstallFlow(true);
-}
-
 void MainWindow::OnWuxInstallWindowClosed(GuiElement *element)
 {
 	// The wux flow's install window closed: return to the plain main screen
-	// (header + "install wux" button). The browser is deliberately not
-	// rebuilt; the flow removed it when the install started.
-	FinishInstallFlow(false);
+	// (header + the two install buttons).
+	FinishInstallFlow();
 }
 
-void MainWindow::FinishInstallFlow(bool rebuildBrowser)
+void MainWindow::OnWupInstallWindowClosed(GuiElement *element)
+{
+	// The manual /install WUP flow's install window closed: same return to the
+	// plain main screen. Nothing is rebuilt - the folder browser is gone.
+	FinishInstallFlow();
+}
+
+void MainWindow::FinishInstallFlow()
 {
 	// Any install window closing releases the flow, so a new one may start.
 	// Re-enabling home is harmless - the install thread already did it.
 	wux.flowFinished();
 	OSEnableHomeButtonMenu(TRUE);
-	Application::instance()->exitEnable();
-	
-	if(folderList)
-		folderList->Get();
-	if(rebuildBrowser)
-		SetBrowserWindow();
 	currentDrcFrame->bringToFront(&headerFrame);
 }
 
@@ -403,14 +390,85 @@ void MainWindow::OnOpenEffectFinish(GuiElement *element)
 void MainWindow::OnWuxInstallClicked(GuiButton *button, const GuiController *controller,
                                      GuiTrigger *trigger)
 {
-	// Guard against re-entrancy: the A/touch triggers fire from anywhere
-	// (setClickEverywhere), so a press is accepted only while the flow is
-	// Idle - no extraction running and no install window from either flow.
-	// The state transition is the guard; a refusal leaves the screen as it is.
+	// Direct touch on the wux button (the A key is handled by OnMainNavClick).
+	// The tap takes the A-highlight too, so the flow started by A afterwards
+	// is the one the user last used, not the old default.
+	SetMainFocus(true);
+	TriggerWuxInstall();
+}
+
+void MainWindow::OnWupInstallClicked(GuiButton *button, const GuiController *controller,
+                                     GuiTrigger *trigger)
+{
+	// Direct touch on the wup button; same highlight rule as the wux tap.
+	SetMainFocus(false);
+	TriggerWupInstall();
+}
+
+void MainWindow::OnMainNavClick(GuiButton *button, const GuiController *controller,
+                                GuiTrigger *trigger)
+{
+	// The whole-screen proxy is the only element with an A trigger, so A always
+	// means "activate the focused button" - never both at once.
+	if (trigger == &mainAtrigger)
+	{
+		// Same explicit re-entrancy contract as the dpad branch below: a
+		// press a box is answering must never also start a flow. The
+		// Idle guard is the gate; child-append order is not.
+		if (wux.state() != WuxFlow::State::Idle)
+			return;
+
+		if (mainFocusWux)
+			TriggerWuxInstall();
+		else
+			TriggerWupInstall();
+		return;
+	}
+
+	// D-pad moves the highlight only while the flow is idle; a box or worker
+	// owns the screen otherwise.
+	if (wux.state() != WuxFlow::State::Idle)
+		return;
+
+	bool wantWux = (trigger == &mainUpTrigger);
+	if (wantWux == mainFocusWux)
+		return;
+
+	SetMainFocus(wantWux);
+}
+
+void MainWindow::SetMainFocus(bool focusWux)
+{
+	mainFocusWux = focusWux;
+	if (mainFocusWux)
+	{
+		wuxButton->setState(GuiElement::STATE_SELECTED);
+		wupButton->clearState(GuiElement::STATE_SELECTED);
+	}
+	else
+	{
+		wupButton->setState(GuiElement::STATE_SELECTED);
+		wuxButton->clearState(GuiElement::STATE_SELECTED);
+	}
+}
+
+void MainWindow::TriggerWuxInstall()
+{
+	// Idle -> WuxExtract is the re-entrancy guard: it refuses while any flow is
+	// active, so a press during extraction or an install is ignored.
 	if (!wux.beginExtraction())
 		return;
 
 	RunWuxInstall();
+}
+
+void MainWindow::TriggerWupInstall()
+{
+	// Idle -> WupInstall, the same guard on the manual /install path.
+	if (!wux.beginWupInstall())
+		return;
+
+	RunWupInstall();
 }
 
 void MainWindow::RunWuxInstall()
@@ -423,7 +481,15 @@ void MainWindow::RunWuxInstall()
 		return;
 	}
 
-	std::string wuxPath = std::string(SD_WUDUMP_PATH) + "/" + dl.GetFilename(0);
+	// The list is name-sorted and the first file is used (a chooser is an
+	// open feature item), so say which image this run uses - visibly, not
+	// only after the extraction in the delete prompt.
+	const char *wuxName = dl.GetFilename(0);
+	log_printf("WUX: %d .wux file(s) in /wudump, installing %s%s",
+	           dl.GetFilecount(), wuxName,
+	           dl.GetFilecount() > 1 ? " (alphabetically first; one image per run)" : "");
+
+	std::string wuxPath = std::string(SD_WUDUMP_PATH) + "/" + wuxName;
 	std::string keyPath = std::string(SD_WUDUMP_PATH) + "/game.key";
 	std::string commonKeyPath = std::string(SD_WUDUMP_PATH) + "/common.key";
 
@@ -447,7 +513,10 @@ void MainWindow::StartWuxExtraction(const std::string &wuxPath,
 	wux.progressBox()->setState(GuiElement::STATE_DISABLED);
 	wux.progressBox()->setEffect(EFFECT_FADE, 10, 255);
 	wux.progressBox()->setTitle("Extracting .wux");
-	wux.progressBox()->setMessage1("Reading disc structure...");
+	// Name the image on screen while it runs, so a silent positional pick of
+	// one file among several is visible during the extraction, not after.
+	wux.progressBox()->setMessage1(wuxPath.substr(wuxPath.find_last_of('/') + 1) +
+	                                " - reading disc structure...");
 	wux.progressBox()->setProgress(0.0f);
 	wux.progressBox()->setProgressBarInfo("0.0 / 0.0 MB (0%)");
 	wux.progressBox()->effectFinished.connect(this, &MainWindow::OnWuxProgressBoxEffectFinished);
@@ -455,7 +524,6 @@ void MainWindow::StartWuxExtraction(const std::string &wuxPath,
 
 	// Keep the home button out while files are being written; the install
 	// worker applies the same guard during its run.
-	Application::instance()->exitDisable();
 	OSEnableHomeButtonMenu(FALSE);
 
 	wux.setThread(new WuxExtractThread(wuxPath, keyPath, commonKeyPath,
@@ -509,19 +577,15 @@ void MainWindow::OnWuxExtractFinished()
 
 	if (err == wux::Error::Ok && result.ok)
 	{
-		// Release the browser before the folder list is re-read: its buttons
-		// and its cached count belong to the previous scan.
-		CloseBrowser();
-
 		// Refresh the folder list and select every extracted folder so the
-		// installer runs without the user navigating the browser. A disc can
+		// installer runs without the user picking folders by hand. A disc can
 		// yield several titles (e.g. the game plus the rear.rpx dummy).
 		if (folderList == NULL)
 			folderList = new CFolderList();
 		folderList->Get();
-		// Drop any selection left over from the file browser; otherwise a
-		// folder the user ticked earlier would be installed and deleted by
-		// this flow.
+		// Drop any selection left over from the scan; otherwise a
+		// folder selected by a previous flow could be installed and deleted by
+		// this one.
 		folderList->UnSelectAll();
 		for (size_t d = 0; d < result.outDirs.size(); ++d)
 		{
@@ -569,9 +633,8 @@ void MainWindow::OnWuxExtractFinished()
 			}
 			else
 			{
-				// The wux flow ends back on the plain main screen (no WUP
-				// browser), unlike the browser flow, so it gets its own close
-				// handler.
+				// The wux flow ends back on the plain main screen, so it gets
+				// its own close handler (distinct from the manual WUP flow).
 				window->installWindowClosed.connect(this,
 				                                    &MainWindow::OnWuxInstallWindowClosed);
 				installStarted = true;
@@ -636,6 +699,69 @@ void MainWindow::ShowWuxResult(const std::string &msg, bool ok)
 	wux.enterErrorBox();
 }
 
+void MainWindow::RunWupInstall()
+{
+	// Manual WUP install. Re-read the shared folder list, then select every
+	// folder directly under /install (the scanner already admits only those
+	// that directly contain title.tik. Any
+	// /wudump entries and the bare-"install" fallback (loose .tik files) are
+	// left unselected, so this button installs only what the user placed in
+	// /install.
+	if (folderList == NULL)
+		folderList = new CFolderList();
+	folderList->Get();
+	folderList->UnSelectAll();
+
+	const std::string installPrefix = std::string(SD_INSTALL_PATH) + "/";
+	for (int i = 0; i < folderList->GetCount(); ++i)
+	{
+		std::string path = folderList->GetPath(i);
+		if (path.size() > installPrefix.size() &&
+		    path.compare(0, installPrefix.size(), installPrefix) == 0)
+			folderList->Select(i);
+	}
+
+	if (folderList->GetSelectedCount() == 0)
+	{
+		// Nothing recognizable: report it and leave the flow via the box's OK
+		// click rather than starting a 0-selection install.
+		ShowWupResult("No installable WUP folder found in /install.", false);
+		return;
+	}
+
+	// The "are you sure" and NAND/USB prompts stay; askDelete adds the wux
+	// flow's delete question. Yes removes only folders whose own install
+	// succeeded; with no cleanupFiles this flow cannot reach /wudump.
+	InstallWindow::InstallOptions options;
+	options.askDelete = true;
+	InstallWindow *window = new InstallWindow(folderList, options);
+	if (!window->isCreated())
+	{
+		delete window;
+		ShowWupResult("Could not start the installer (thread creation failed).", false);
+		return;
+	}
+	window->installWindowClosed.connect(this, &MainWindow::OnWupInstallWindowClosed);
+}
+
+void MainWindow::ShowWupResult(const std::string &msg, bool ok)
+{
+	MessageBox *box = new MessageBox(MessageBox::BT_OK,
+	                                 ok ? MessageBox::IT_ICONTRUE : MessageBox::IT_ICONERROR,
+	                                 false);
+	box->setState(GuiElement::STATE_DISABLED);
+	box->setEffect(EFFECT_FADE, 10, 255);
+	box->setTitle(ok ? "WUP install:" : "WUP install failed:");
+	box->setMessage1(msg);
+	box->effectFinished.connect(this, &MainWindow::OnOpenEffectFinish);
+	box->messageOkClicked.connect(this, &MainWindow::OnWuxMessageBoxClick);
+	currentDrcFrame->append(box);
+
+	// The box owns the screen until the OK click; OnWuxMessageBoxClick is
+	// flow-agnostic and returns both entry points to Idle.
+	wux.enterErrorBox();
+}
+
 void MainWindow::OnWuxMessageBoxClick(GuiElement *element, int ok)
 {
 	currentDrcFrame->remove(element);
@@ -645,5 +771,4 @@ void MainWindow::OnWuxMessageBoxClick(GuiElement *element, int ok)
 	// "install wux" button may be used again.
 	wux.flowFinished();
 	OSEnableHomeButtonMenu(TRUE);
-	Application::instance()->exitEnable();
 }

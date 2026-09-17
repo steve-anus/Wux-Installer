@@ -43,6 +43,8 @@ MessageBox::MessageBox(int typeButtons, int typeIcons, bool progressbar)
 	pendingMessage2 = false;
 	pendingInfo = false;
 	pendingProgress = false;
+	pendingReload = false;
+	answered = false;
 	pendingProgressVal = 0.0f;
 	
 	bgBlur.setAlpha(0.5f);
@@ -171,6 +173,24 @@ void MessageBox::reload(std::string title, std::string message1, std::string mes
 	titleText.effectFinished.connect(this, &MessageBox::OnReloadFadeOutFinished);
 }
 
+void MessageBox::stageReload(std::string title, std::string message1, std::string message2, int typeButtons, int typeIcons, bool progressbar, std::string pbInfo)
+{
+	// Worker-thread entry point for reload(): the payload goes into the same
+	// staging fields reload() uses, plus one flag. reload() starts fade
+	// effects and signal connections, which belong to the render thread; it
+	// runs from updateEffects() when the flag is seen.
+	crossThreadMutex.lock();
+	newButtonsType = typeButtons;
+	newIconType = typeIcons;
+	newProgressBar = progressbar;
+	newTitle = title;
+	newMessage1 = message1;
+	newMessage2 = message2;
+	newInfo = pbInfo;
+	pendingReload = true;
+	crossThreadMutex.unlock();
+}
+
 void MessageBox::OnReloadFadeOutFinished(GuiElement * element)
 {
 	titleText.effectFinished.disconnect(this);
@@ -227,7 +247,12 @@ void MessageBox::OnReloadFadeInFinished(GuiElement * element)
 {
 	titleText.effectFinished.disconnect(this);
 	this->resetState();
-	selectedButtonDPAD = 0;
+	// Same preselect rule as setButtons: a two-button box fades in with no
+	// selection, so the first dpad press picks an end instead of answering.
+	// A buttonless box must never arm 0: the A dispatch would then call
+	// into an empty messageButtons vector (M1).
+	selectedButtonDPAD = (buttonCount == 2) ? -1 : (buttonCount == 1 ? 0 : -1);
+	answered = false;
 	UpdateButtons(NULL, NULL, NULL);
 }
 
@@ -333,7 +358,11 @@ void MessageBox::setButtons(int typeButtons)
 	
 	if(typeButtons != BT_NOBUTTON)
 	{
-		selectedButtonDPAD = 0;
+		// Two-decision boxes (Yes/No, Nand/USB) start unselected: a queued A
+		// press arriving while this box was still fading in must not answer a
+		// decision the user has not seen yet. One-button boxes keep A as an
+		// instant answer.
+		selectedButtonDPAD = (typeButtons == BT_YESNO || typeButtons == BT_DEST) ? -1 : 0;
 		
 		typeButtons > 1 ? buttonCount = 2 : buttonCount = 1;
 		messageButtons.resize(buttonCount);
@@ -344,12 +373,17 @@ void MessageBox::setButtons(int typeButtons)
 			messageButtons[i].messageButtonHighlightedImg = new GuiImage(buttonHighlightedImageData);
 			messageButtons[i].messageButton = new GuiButton(messageButtons[i].messageButtonImg->getWidth(), messageButtons[i].messageButtonImg->getHeight());
 			
-			if(typeButtons == BT_OK || typeButtons == BT_CANCEL || typeButtons == BT_DEST)
-				messageButtons[i].messageButtonText = new GuiText(ButtonString[typeButtons + i].c_str(), 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f));
-			else if(typeButtons == BT_OKCANCEL)
-				messageButtons[i].messageButtonText = new GuiText(ButtonString[typeButtons - 2 + i].c_str(), 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f));
-			else if(typeButtons == BT_YESNO)
-				messageButtons[i].messageButtonText = new GuiText(ButtonString[typeButtons - 1 + i].c_str(), 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f));//nand:yes, usb:no
+			// Label base into ButtonString {Ok, Cancel, Yes, No, Nand, USB},
+			// spelled per type so the indices stay right if a ButtonType is
+			// ever renumbered.
+			int textBase;
+			if(typeButtons == BT_YESNO)
+				textBase = 2;
+			else if(typeButtons == BT_DEST)
+				textBase = 4;
+			else
+				textBase = typeButtons; // BT_OK -> Ok, BT_CANCEL -> Cancel
+			messageButtons[i].messageButtonText = new GuiText(ButtonString[textBase + i].c_str(), 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f));
 			
 			messageButtons[i].messageButtonText->setPosition(0, -10);
 			messageButtons[i].messageButton->setImageSelectOver(messageButtons[i].messageButtonHighlightedImg);
@@ -368,11 +402,6 @@ void MessageBox::setButtons(int typeButtons)
 				case BT_CANCEL:{
 					messageButtons[i].messageButton->clicked.connect(this, &MessageBox::OnCancelButtonClick);
 					messageButtons[i].messageButton->setPosition(0, -240);
-					break;
-				}
-				case BT_OKCANCEL:{
-					i == 0 ? messageButtons[i].messageButton->clicked.connect(this, &MessageBox::OnOkButtonClick) : messageButtons[i].messageButton->clicked.connect(this, &MessageBox::OnCancelButtonClick);
-					messageButtons[i].messageButton->setPosition(- 220 + (messageButtons[i].messageButtonImg->getWidth()) * i , - 240);
 					break;
 				}
 				case BT_YESNO:{
@@ -414,6 +443,26 @@ void MessageBox::setProgressBarInfo(const std::string & info)
 void MessageBox::updateEffects()
 {
 	GuiFrame::updateEffects();
+	// A reload staged by the install worker is applied here, on the render
+	// thread: reload() touches fade effects and signal connections.
+	bool doReload = false;
+	std::string t, m1, m2, pi;
+	int bt = BT_NOBUTTON, bi = IT_NOICON;
+	bool pb = false;
+	crossThreadMutex.lock();
+	if(pendingReload)
+	{
+		doReload = true;
+		pendingReload = false;
+		t = newTitle;
+		m1 = newMessage1;
+		m2 = newMessage2;
+		pi = newInfo;
+		bt = newButtonsType;
+		bi = newIconType;
+		pb = newProgressBar;
+	}
+	crossThreadMutex.unlock();
 
 	// Apply everything queued by the setters. This runs from the element
 	// update chain on the render thread, so GuiText mutation is safe here.
@@ -445,6 +494,13 @@ void MessageBox::updateEffects()
 		pendingProgress = false;
 	}
 	crossThreadMutex.unlock();
+
+	if(doReload)
+		reload(t, m1, m2, bt, bi, pb, pi);
+
+	// Owners apply their per-frame GUI work (worker-queued signal wiring)
+	// here, in the same frame the staged reload landed.
+	effectsTick();
 }
 
 void MessageBox::UpdateButtons(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
@@ -462,24 +518,34 @@ void MessageBox::OnDPADClick(GuiButton *button, const GuiController *controller,
 {
 	if(trigger == &buttonATrigger)
 	{
-        if(selectedButtonDPAD >= 0)
+		// Bound by buttonCount: a buttonless box carries an empty vector
+		// and buttonCount -1, and must never dispatch (M1).
+		if(selectedButtonDPAD >= 0 && selectedButtonDPAD < buttonCount)
 			messageButtons[selectedButtonDPAD].messageButton->clicked(messageButtons[selectedButtonDPAD].messageButton, controller, trigger);
 	}
 	else
 	{
+		// Nothing to navigate or arm on a buttonless box.
+		if(buttonCount <= 0)
+			return;
+
 		if(trigger == &buttonRightTrigger)
 		{
-			if(selectedButtonDPAD >= buttonCount-1)
+			if(selectedButtonDPAD < 0)
+				selectedButtonDPAD = 0;     // first press enters at this end
+			else if(selectedButtonDPAD >= buttonCount-1)
 				return;
-			
-			selectedButtonDPAD++;
+			else
+				selectedButtonDPAD++;
 		}
 		else if(trigger == &buttonLeftTrigger)
 		{
-			if(selectedButtonDPAD <= 0)
+			if(selectedButtonDPAD < 0)
+				selectedButtonDPAD = buttonCount-1;
+			else if(selectedButtonDPAD <= 0)
 				return;
-			
-			selectedButtonDPAD--;
+			else
+				selectedButtonDPAD--;
 		}
 		
 		UpdateButtons(button,controller,trigger);
