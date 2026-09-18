@@ -71,6 +71,9 @@ private:
 	static Application *applicationInstance;
 	static bool exitApplication;
     static bool quitRequest;
+    //! Release during an unsafe flow: quit once the OS re-foregrounds or
+    //! sends EXITING; releasing then suspends core 0/1 threads.
+    static bool pendingExit;
 	
 	void executeThread(void);
 	

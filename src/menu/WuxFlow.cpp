@@ -16,6 +16,8 @@
  */
 #include "WuxFlow.h"
 
+#include <coreinit/systeminfo.h>
+
 #include "gui/MessageBox.h"
 #include "utils/logger.h"
 #include "WuxExtractThread.h"
@@ -57,12 +59,30 @@ bool WuxFlow::transition(State expected, State newState)
         return false;
     }
 
-    curState = newState;
+    applyState(newState);
     return true;
 }
 
 void WuxFlow::force(State newState)
 {
+    applyState(newState);
+}
+
+void WuxFlow::applyState(State newState)
+{
+    // Home menu follows the flow: live only while Idle, so no flow phase can
+    // reach the release handshake. Accepted changes log; the Idle crossing
+    // records the menu action (the witness for a stranded button).
+    const bool crossing = (curState == State::Idle) != (newState == State::Idle);
+    if(crossing)
+        log_printf("WuxFlow: %s -> %s, menu %s\n", stateName(curState), stateName(newState),
+                   newState == State::Idle ? "on" : "off");
+    else
+        log_printf("WuxFlow: %s -> %s\n", stateName(curState), stateName(newState));
+
+    if(crossing)
+        OSEnableHomeButtonMenu(newState == State::Idle ? TRUE : FALSE);
+
     curState = newState;
 }
 
@@ -143,6 +163,15 @@ void WuxFlow::releaseProgressBox()
 
 void WuxFlow::shutdown()
 {
+    // Fail-safe: a flow destroyed while live would otherwise strand the home
+    // button disabled with nothing left to re-enable it (unreachable today:
+    // the quit paths keep MainWindow alive, so ~WuxFlow means Idle).
+    if(curState != State::Idle)
+    {
+        log_printf("WuxFlow: destroyed in %s, forcing menu on\n", stateName(curState));
+        OSEnableHomeButtonMenu(TRUE);
+    }
+
     // Order matters: the worker writes to the progress box until it is
     // joined, so the box must go last.
     releaseThread();

@@ -14,7 +14,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  ****************************************************************************/
-#include <coreinit/foreground.h>
 #include <unistd.h>
 
 #include "MainWindow.h"
@@ -411,9 +410,7 @@ void MainWindow::OnWupInstallWindowClosed(GuiElement *element)
 void MainWindow::FinishInstallFlow()
 {
 	// Any install window closing releases the flow, so a new one may start.
-	// Re-enabling home is harmless - the install thread already did it.
 	wux.flowFinished();
-	OSEnableHomeButtonMenu(TRUE);
 	currentDrcFrame->bringToFront(&headerFrame);
 }
 
@@ -558,10 +555,6 @@ void MainWindow::StartWuxExtraction(const std::string &wuxPath,
 	wux.progressBox()->setProgressBarInfo("0.0 / 0.0 MB (0%)");
 	wux.progressBox()->effectFinished.connect(this, &MainWindow::OnWuxProgressBoxEffectFinished);
 	currentDrcFrame->append(wux.progressBox());
-
-	// Keep the home button out while files are being written; the install
-	// worker applies the same guard during its run.
-	OSEnableHomeButtonMenu(FALSE);
 
 	wux.setThread(new WuxExtractThread(wuxPath, keyPath, commonKeyPath,
 	                                   SD_INSTALL_PATH, wux.progressBox()));
@@ -807,5 +800,4 @@ void MainWindow::OnWuxMessageBoxClick(GuiElement *element, int ok)
 	// The wux flow has ended (extraction failed or no image found): the
 	// "install wux" button may be used again.
 	wux.flowFinished();
-	OSEnableHomeButtonMenu(TRUE);
 }

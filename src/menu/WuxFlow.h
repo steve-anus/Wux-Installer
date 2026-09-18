@@ -46,6 +46,9 @@ class WuxExtractThread;
  * Threading: owned by the GUI thread only. The extraction worker never
  * touches this object; MainWindow::update() polls the worker and moves the
  * state on the GUI thread.
+ *
+ * The home-button menu is live only while Idle; applyState enforces that at
+ * every Idle crossing so no flow phase can be backgrounded.
  */
 class WuxFlow
 {
@@ -138,6 +141,9 @@ public:
     void shutdown();
 
 private:
+    //! Single point through which every accepted state change passes; applies
+    //! the home-button gate exactly when the flow crosses the Idle boundary.
+    void applyState(State newState);
     State curState;
 
     //! Real delete of the progress box. Only shutdown() may use it: once a

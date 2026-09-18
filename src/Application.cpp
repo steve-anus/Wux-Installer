@@ -38,6 +38,7 @@
 Application *Application::applicationInstance = NULL;
 bool Application::exitApplication = false;
 bool Application::quitRequest = false;
+bool Application::pendingExit = false;
 
 u32 Application::hbmDeniedCallback(void *context)
 {
@@ -86,7 +87,9 @@ Application::~Application()
 	for(int i = 0; i < 5; i++)
 		delete controller[i];
 	
+	log_printf("teardown: joining delete worker\n");
 	AsyncDeleter::destroyInstance();
+	log_printf("teardown: delete worker joined\n");
 	Resources::Clear();
 	
 	SoundHandler::DestroyInstance();
@@ -204,30 +207,27 @@ bool Application::procUI(void)
 				bool rebuildUi = drainDeleteQueue();
 				if(!rebuildUi)
 				{
-					//! Cannot prove the queued destructors have run; tearing
-					//! the UI down now could free memory under a pending
-					//! delete. Quit instead: process exit reclaims it all.
-					//! The writer still gets the cancel + bounded grace - a
-					//! stuck delete queue is no reason to abandon it mid-write.
+					//! Queued destructors may not have run; rebuilding now
+					//! could free memory under a pending delete. Stop the
+					//! writer and exit at an OS-sanctioned moment instead.
 					log_printf("memory: delete queue drain timed out\n");
-					log_printf("foreground release with stuck delete queue: exiting\n");
+					log_printf("foreground release with stuck delete queue: deferred exit\n");
 					if(mainWindow)
 					{
 						mainWindow->logFlowGate("stuck delete queue");
 						mainWindow->abortFlowForExit();
 					}
-					quit();
+					pendingExit = true;
 				}
 				else if(mainWindow && !mainWindow->isFlowIdle())
 				{
-					//! An active flow owns windows its worker threads are
-					//! still writing to; a rebuild would pull them out from
-					//! under the workers. Stop the extraction worker, then
-					//! quit to the menu without tearing anything down.
+					//! A live flow owns windows its workers write to; a rebuild
+					//! would free them under the writers. Stop the extraction
+					//! worker; exit only at the next foreground or on EXITING.
 					mainWindow->logFlowGate("foreground release");
-					log_printf("foreground release during active flow: exiting\n");
+					log_printf("foreground release during active flow: deferred exit\n");
 					mainWindow->abortFlowForExit();
-					quit();
+					pendingExit = true;
 					rebuildUi = false;
 				}
 
@@ -272,11 +272,9 @@ bool Application::procUI(void)
 				}
 				else
 				{
-					//! Quit path: the loop tail's fadeOut() must not run once
-					//! ProcUIDrawDoneRelease() has handed the screen over, and
-					//! any live worker may still depend on the current
-					//! allocations. Detach the video instead of destroying it;
-					//! process exit reclaims everything.
+					//! Deferred-exit path: no draw may run after
+					//! ProcUIDrawDoneRelease() handed the screen over, and a
+					//! live worker may still need the current allocations.
 					video = nullptr;
 				}
 				ProcUIDrawDoneRelease();
@@ -289,6 +287,12 @@ bool Application::procUI(void)
 		}
 		case PROCUI_STATUS_IN_FOREGROUND:
 		{
+			if(pendingExit)
+			{
+				log_printf("PROCUI_STATUS_IN_FOREGROUND: deferred exit fires\n");
+				quit();
+				break;
+			}
 			if(!quitRequest)
 			{
 				if(video == nullptr)

@@ -115,9 +115,9 @@ public:
                !wux.progressFadingOut() && !wux.progressBox();
     }
 
-    //! Foreground release while a flow runs: asks the extraction worker to
-    //! stop and waits a bounded time for it, before the app quits to the
-    //! menu. NULL-safe when no worker exists.
+    //! Before a quit - from the release branch or EXITING: asks the extraction
+    //! worker to stop and waits a bounded time for it. NULL-safe when no
+    //! worker exists.
     //! True = the writer stopped (or never ran); false = abandoned after the
     //! grace, with the reason already in the log.
     bool abortFlowForExit();
@@ -141,9 +141,9 @@ private:
 
 	void OnWuxInstallWindowClosed(GuiElement *element);
 	void OnWupInstallWindowClosed(GuiElement *element);
-	//! Shared tail of the install-window close handlers: releases the flow and
-	//! restores the home button. Returns to the plain start screen; the folder
-	//! browser is gone, so nothing is rebuilt.
+	//! Shared tail of the install-window close handlers: returns to Idle, and
+	//! the Idle crossing restores the home button. Returns to the plain start
+	//! screen; the folder browser is gone, so nothing is rebuilt.
 	void FinishInstallFlow(void);
 	void OnOpenEffectFinish(GuiElement *element);
 	void OnWuxInstallClicked(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);

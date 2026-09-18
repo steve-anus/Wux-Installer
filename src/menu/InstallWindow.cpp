@@ -319,8 +319,6 @@ void InstallWindow::executeThread()
 	log_printf("InstallWindow: install thread entered (confirmed install) selected=%d\n",
 	           folderList->GetSelectedCount());
 
-	OSEnableHomeButtonMenu(FALSE);
-	
 	canceled = false;
 	
 	bool APD_enabled = isEnabledAutoPowerDown();
@@ -483,8 +481,6 @@ void InstallWindow::executeThread()
 	
 	if(APD_enabled)
 		enableAutoPowerDown();
-	
-	OSEnableHomeButtonMenu(TRUE);
 }
 
 void InstallWindow::InstallProcess(int pos, int total)
