@@ -16,7 +16,7 @@ in it:
 `common.key`      : your console's common key, the same for every game. 16 bytes raw, or 32 hex characters 
 
 `wudump` is the only place it looks for these. The app also uses a folder named
-`install` in the card root for wup files. If you have wup files already, place them here under a subfolder to install them, so: /install/<foldername>/
+install in the card root for wup files. If you have wup files already, place them here under a subfolder to install them, so: /install/SomeName/
 
 ## How to install
 
