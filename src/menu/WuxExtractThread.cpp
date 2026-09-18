@@ -17,12 +17,16 @@
 #include "WuxExtractThread.h"
 #include "utils/StringTools.h"
 
-void WuxExtractThread::onProgress(int cur, int total, U32 contentId,
+bool WuxExtractThread::onProgress(int cur, int total, U32 contentId,
                                   U64 doneBytes, U64 totalBytes, void *user)
 {
     WuxExtractThread *self = (WuxExtractThread *)user;
-    if (!self || !self->progressBox)
-        return;
+    if (!self)
+        return true;
+    if (self->cancelRequested.load())
+        return false;   // quit path asked the writer to stop
+    if (!self->progressBox)
+        return true;
 
     int percent = (totalBytes != 0) ? (int)((doneBytes * 100) / totalBytes) : 0;
     if (percent > 100)
@@ -45,6 +49,13 @@ void WuxExtractThread::onProgress(int cur, int total, U32 contentId,
         info += "%)";
         self->progressBox->setProgressBarInfo(info);
     }
+    return true;
+}
+
+bool WuxExtractThread::onCancel(void *user)
+{
+    WuxExtractThread *self = (WuxExtractThread *)user;
+    return !(self && self->cancelRequested.load());
 }
 
 WuxExtractThread::WuxExtractThread(const std::string &wuxFile,
@@ -74,5 +85,5 @@ void WuxExtractThread::executeThread()
     wux::WuxInstaller installer;
     error = installer.extract(wuxPath.c_str(), keyPath.c_str(),
                               commonKeyPath.c_str(), outRoot.c_str(),
-                              result, onProgress, this);
+                              result, onProgress, this, onCancel, this);
 }

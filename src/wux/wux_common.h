@@ -41,7 +41,8 @@ enum class Error {
     NotFound,        // file or partition not present
     MissingKey,      // game.key absent or not 16 bytes
     NoSpace,         // not enough free space for the extracted files
-    NotSupported
+    NotSupported,
+    Cancelled        // streaming stopped on request (ProgressFn returned false)
 };
 
 inline const char* errorName(Error e) {
@@ -58,6 +59,7 @@ inline const char* errorName(Error e) {
         case Error::MissingKey:    return "key not usable";
         case Error::NoSpace:       return "not enough free space";
         case Error::NotSupported:  return "a same-named file exists on the card";
+        case Error::Cancelled:     return "cancelled";
         default:                   return "unknown";
     }
 }

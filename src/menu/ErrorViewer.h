@@ -16,6 +16,10 @@ class ErrorViewer
 
         static void drawDRC();
 
+        //! Mirrors the erreula singleton state for callers that must not
+        //! touch it after teardown (the home-button-denied callback).
+        static bool isInitialized() { return initialized; }
+
     private:
         FSClient *client;
         nn::erreula::CreateArg createArg;

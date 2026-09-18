@@ -105,6 +105,27 @@ public:
     //! extraction only transitions out when some controller reports input.
     void updateFlow();
 
+    //! True when no flow holds a window, worker, or progress box (a box
+    //! mid-fade-out is orthogonal to State, so both tests are needed): the
+    //! only state in which the foreground cycle may tear the window down and
+    //! rebuild it (the Application::procUI release branch consults this).
+    bool isFlowIdle() const
+    {
+        return wux.state() == WuxFlow::State::Idle &&
+               !wux.progressFadingOut() && !wux.progressBox();
+    }
+
+    //! Foreground release while a flow runs: asks the extraction worker to
+    //! stop and waits a bounded time for it, before the app quits to the
+    //! menu. NULL-safe when no worker exists.
+    //! True = the writer stopped (or never ran); false = abandoned after the
+    //! grace, with the reason already in the log.
+    bool abortFlowForExit();
+
+    //! Prints the flow conditions that block a rebuild (state, live progress
+    //! box, box mid-fade-out), so the log says which one held the gate.
+    void logFlowGate(const char *why) const;
+
     void lockGUI()
     {
         guiMutex.lock();

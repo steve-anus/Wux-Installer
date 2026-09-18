@@ -77,6 +77,11 @@ private:
     std::atomic<bool> exitApplication;
     std::queue<AsyncDeleter::Element *> deleteElements;
     std::queue<AsyncDeleter::Element *> realDeleteElements;
+    //! Elements popped but not yet deleted. Counted under deleteMutex and
+    //! required zero by deleteQueueEmpty(): the queues alone read empty while
+    //! the LAST element is still between its pop and its destructor, and
+    //! heap teardown waits on this answer.
+    int deleteInFlight;
     CMutex deleteMutex;
 };
 

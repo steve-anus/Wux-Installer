@@ -59,6 +59,7 @@ AsyncDeleter * AsyncDeleter::getDeleterInstance(void)
 AsyncDeleter::AsyncDeleter()
 	: CThread(CThread::eAttributeAffCore1 | CThread::eAttributePinnedAff)
 	, exitApplication(false)
+	, deleteInFlight(0)
 {
 }
 
@@ -157,7 +158,8 @@ bool AsyncDeleter::deleteQueueEmpty()
 
     inst->deleteMutex.lock();
     bool empty = inst->deleteElements.empty() &&
-                 inst->realDeleteElements.empty();
+                 inst->realDeleteElements.empty() &&
+                 inst->deleteInFlight == 0;
     inst->deleteMutex.unlock();
     return empty;
 }
@@ -170,18 +172,19 @@ void AsyncDeleter::triggerDeleteProcess(void)
     if(!inst)
         return;
 
-    bool moved = false;
-
     inst->deleteMutex.lock();
     while(!inst->deleteElements.empty())
     {
         inst->realDeleteElements.push(inst->deleteElements.front());
         inst->deleteElements.pop();
-        moved = true;
     }
+    //! Resume on any pending work, not only on a move: elements already in
+    //! the worker's own queue because an earlier trigger's resume raced the
+    //! worker's suspend need this resume to ever reach them.
+    bool pending = !inst->realDeleteElements.empty();
     inst->deleteMutex.unlock();
 
-    if(moved)
+    if(pending)
         inst->resumeThread();
 }
 
@@ -189,7 +192,15 @@ void AsyncDeleter::executeThread(void)
 {
     while(!exitApplication)
     {
-        suspendThread();
+        //! Re-check the queue under its mutex before parking: a producer
+        //! that moved elements just before this point can otherwise have its
+        //! resume land while the worker still reads as running, stranding
+        //! the elements until some later trigger.
+        deleteMutex.lock();
+        bool hasWork = !realDeleteElements.empty();
+        deleteMutex.unlock();
+        if(!hasWork)
+            suspendThread();
 
         //! delete elements that require post process deleting
         //! because otherwise they would block or do invalid access on GUI thread
@@ -197,13 +208,18 @@ void AsyncDeleter::executeThread(void)
         {
             AsyncDeleter::Element *element = NULL;
 
-            //! Test and pop in ONE critical section: reading empty()/front()
-            //! outside the lock races the producers and the shutdown drain.
+            //! Test, pop and mark in-flight in ONE critical section: reading
+            //! empty()/front() outside the lock races the producers and the
+            //! shutdown drain, and an element counted only after the pop
+            //! leaves a window where deleteQueueEmpty() answers "empty"
+            //! while the last destructor still runs against heaps that
+            //! teardown is about to destroy.
             deleteMutex.lock();
             if(!realDeleteElements.empty())
             {
                 element = realDeleteElements.front();
                 realDeleteElements.pop();
+                deleteInFlight++;
             }
             deleteMutex.unlock();
 
@@ -211,6 +227,10 @@ void AsyncDeleter::executeThread(void)
                 break;
 
             delete element;
+
+            deleteMutex.lock();
+            deleteInFlight--;
+            deleteMutex.unlock();
         }
     }
 

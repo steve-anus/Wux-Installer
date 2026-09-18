@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  ****************************************************************************/
 #include <coreinit/foreground.h>
+#include <unistd.h>
 
 #include "MainWindow.h"
 #include "Application.h"
@@ -185,6 +186,42 @@ void MainWindow::update(GuiController *controller)
 	}
 
 	errorViewer->calc();
+}
+
+bool MainWindow::abortFlowForExit()
+{
+	//! The app quits from the foreground-release path while a flow holds live
+	//! windows. The extraction worker writes through stdio and must not be
+	//! abandoned mid-write: ask it to stop (it checks the flag per written
+	//! chunk and unlinks the partial file like a write error would) and wait
+	//! a bounded grace for it to end. The install worker only drives MCP
+	//! handoffs the server completes or drops on its own; abandoning it at
+	//! process exit is the situation the exit-to-menu path always presented.
+	WuxExtractThread *t = wux.thread();
+	//! isCreated() also covers the never-ran case: an unstarted or
+	//! already-released thread reports not-terminated forever, so polling it
+	//! would only burn the grace and log a false "still running".
+	if(!t || !t->isCreated())
+		return true;
+
+	t->requestCancel();
+	for(int i = 0; i < 300 && !t->isThreadTerminated(); i++)
+		usleep(5000);
+
+	if(!t->isThreadTerminated())
+	{
+		log_printf("abortFlowForExit: extraction worker still running after 1.5s\n");
+		return false;
+	}
+	return true;
+}
+
+void MainWindow::logFlowGate(const char *why) const
+{
+	log_printf("flow gate (%s): state=%s progress box=%s fade-out=%s\n",
+		why, WuxFlow::stateName(wux.state()),
+		wux.progressBox() ? "live" : "none",
+		wux.progressFadingOut() ? "yes" : "no");
 }
 
 void MainWindow::updateFlow()

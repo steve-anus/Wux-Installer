@@ -261,8 +261,14 @@ Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
         done += chunk;
         if (wp && wp->fn) {
             wp->doneBytes += chunk;
-            wp->fn(wp->cur, wp->total, wp->contentId,
-                   wp->doneBytes, wp->totalBytes, wp->user);
+            if (!wp->fn(wp->cur, wp->total, wp->contentId,
+                        wp->doneBytes, wp->totalBytes, wp->user)) {
+                // The listener asked us to stop: drop the partial file the
+                // same way a write error would and report the cancel.
+                ::close(fd);
+                ::unlink(path);
+                return Error::Cancelled;
+            }
         }
     }
     if (::close(fd) != 0) { ::unlink(path); return Error::IoError; }
@@ -424,10 +430,15 @@ struct TitleData {
 
 } // namespace
 
+// The one cancel outcome string, shared by every early exit and the tail
+// report so the log wording cannot drift between sites.
+static const char* const kCancelledMsg = "extraction cancelled";
+
 Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                             const char* commonKeyPath, const char* outRoot,
                             ExtractResult& result,
-                            ProgressFn progress, void* progressUser) {
+                            ProgressFn progress, void* progressUser,
+                            CancelFn cancel, void* cancelUser) {
     try {
         result = ExtractResult();
 
@@ -535,6 +546,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         // Pass 1: read + parse the metadata of every title.
         std::vector<TitleData> titles(titleDirs.size());
         for (size_t t = 0; t < titleDirs.size(); ++t) {
+            if (cancel && !cancel(cancelUser)) {
+                result.error = kCancelledMsg;
+                return Error::Cancelled;
+            }
             TitleData& td = titles[t];
             td.dir = titleDirs[t];
             td.outDir = std::string(outRoot) + "/" + td.dir->name;
@@ -663,6 +678,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         int totalContents = 0;
         U64 totalAppBytes = 0;
         for (size_t t = 0; t < titles.size(); ++t) {
+            if (cancel && !cancel(cancelUser)) {
+                result.error = kCancelledMsg;
+                return Error::Cancelled;
+            }
             if (titles[t].error) continue;
             totalContents += (int)titles[t].tmd.contents.size();
             for (size_t i = 0; i < titles[t].tmd.contents.size(); ++i) {
@@ -696,6 +715,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         // real filesystem failure then surfaces as the usual I/O error.
         U64 metaBytes = 0;
         for (size_t t = 0; t < titles.size(); ++t) {
+            if (cancel && !cancel(cancelUser)) {
+                result.error = kCancelledMsg;
+                return Error::Cancelled;
+            }
             if (titles[t].error) continue;
             metaBytes += titles[t].tmdBytes.size() + titles[t].tik.size() +
                          titles[t].cert.size() + titles[t].gmH3Region.size();
@@ -726,6 +749,11 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         // extract or hit same-named files mid-stream. Runs after the free-space
         // guard on purpose: the old data still occupies its blocks while the
         // guard checks, and a failed removal fails only that title.
+        // No cancel checkpoint here: this loop DESTROYS each title's previous
+        // extraction before pass 2 replaces it, so stopping mid-loop could
+        // leave earlier titles deleted and unreplaced. The last checkpoint
+        // (the tally loop above) already covers the "before any destruction"
+        // boundary, and this loop is filesystem-fast, not image-scaled.
         for (size_t t = 0; t < titles.size(); ++t) {
             TitleData& td = titles[t];
             if (td.error) continue;
@@ -767,7 +795,17 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         std::string h3List;
         const size_t kNoteListCap = 200;
 
+        // A cancel (the foreground-release quit) stops every remaining title
+        // and is reported as the outcome, never folded into per-title failure:
+        // a half-extracted set must not look installable.
+        bool cancelled = false;
+
         for (size_t t = 0; t < titles.size(); ++t) {
+            if (cancelled) break;
+            if (cancel && !cancel(cancelUser)) {
+                cancelled = true;
+                break;
+            }
             TitleData& td = titles[t];
             if (td.error) continue;
 
@@ -778,10 +816,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 td.errorText = std::string("create ") + td.outDir + ": " + errorName(dirErr);
                 continue;
             }
-            bool dirCreated = true;   // partial output to clean on any later failure
+            // Partial output to clean on any later failure: ensureDir above
+            // succeeded, so this title owns the folder on the card.
             auto clearPartial = [&]() {
-                if (dirCreated &&
-                    RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0)
+                if (RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0)
                     log_printf("WUX: could not clear partial folder %s", td.outDir.c_str());
             };
 
@@ -825,6 +863,8 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 if (e != Error::Ok) {
                     td.error = true;
                     td.code = e;
+                    if (e == Error::Cancelled)
+                        cancelled = true;
                     td.errorText = std::string("write .app: ") + errorName(e);
                     break;
                 }
@@ -898,6 +938,13 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 failedList += titles[t].dir->name.substr(0, 32);
                 if (failedList.size() > kNoteListCap) break;
             }
+        }
+
+        if (cancelled) {
+            // Cancel wins over partial success: earlier titles completed, but
+            // the set on the card is incomplete by request - report it.
+            result.error = kCancelledMsg;
+            return Error::Cancelled;
         }
 
         if (result.titleCount == 0) {

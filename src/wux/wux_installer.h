@@ -40,9 +40,17 @@ struct ExtractResult {
 // Progress callback, called for every 32 KB chunk written to a .app file,
 // so a GUI can show a live byte-level bar during the extraction:
 // (currentIndex 1-based, total, contentId, bytes written so far, total
-// bytes of all .app files, user). May be null.
-typedef void (*ProgressFn)(int cur, int total, U32 contentId,
+// bytes of all .app files, user). May be null. Return false to stop the
+// extraction at that chunk (the partial file is unlinked, like a write
+// error); return true to keep going.
+typedef bool (*ProgressFn)(int cur, int total, U32 contentId,
                            U64 doneBytes, U64 totalBytes, void* user);
+
+// Cancel checkpoint, polled at every title boundary and before any file is
+// written, so a quit request is seen even while the pipeline is still in its
+// read/decrypt phase (the per-chunk ProgressFn cannot cover that).
+// Return true to keep extracting, false to stop now. May be null.
+typedef bool (*CancelFn)(void* user);
 
 class WuxInstaller {
 public:
@@ -56,7 +64,8 @@ public:
     Error extract(const char* wuxPath, const char* keyPath,
                   const char* commonKeyPath, const char* outRoot,
                   ExtractResult& result,
-                  ProgressFn progress = nullptr, void* progressUser = nullptr);
+                  ProgressFn progress = nullptr, void* progressUser = nullptr,
+                  CancelFn cancel = nullptr, void* cancelUser = nullptr);
 };
 
 } // namespace wux

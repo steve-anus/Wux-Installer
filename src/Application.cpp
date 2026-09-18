@@ -29,8 +29,10 @@
 #include "gui/WPadController.h"
 #include "resources/Resources.h"
 #include "sounds/SoundHandler.hpp"
+#include "system/AsyncDeleter.h"
 #include "system/exception_handler.h"
 #include "system/memory.h"
+#include "menu/ErrorViewer.h"
 #include "utils/logger.h"
 
 Application *Application::applicationInstance = NULL;
@@ -39,6 +41,11 @@ bool Application::quitRequest = false;
 
 u32 Application::hbmDeniedCallback(void *context)
 {
+	//! The erreula singleton is created and destroyed with the main window;
+	//! a dispatch arriving after its teardown must not touch it.
+	if(!ErrorViewer::isInitialized())
+		return 0;
+
 	nn::erreula::HomeNixSignArg homeNixSignArg;
 	nn::erreula::AppearHomeNixSign(homeNixSignArg);
 	
@@ -149,6 +156,20 @@ void Application::fadeOut()
     video->drcEnable(false);
 }
 
+//! Hands the deferred-delete queues to the delete worker and waits (bounded)
+//! for both queues and any in-flight delete to settle. True = fully drained.
+static bool drainDeleteQueue(void)
+{
+	for(int i = 0; i < 200; i++)
+	{
+		AsyncDeleter::triggerDeleteProcess();
+		if(AsyncDeleter::deleteQueueEmpty())
+			return true;
+		usleep(5000);
+	}
+	return false;
+}
+
 bool Application::procUI(void)
 {
     bool executeProcess = false;
@@ -158,6 +179,11 @@ bool Application::procUI(void)
 		case PROCUI_STATUS_EXITING:
 		{
 			log_printf("PROCUI_STATUS_EXITING\n");
+			//! Stop an extraction writer that may still run: the bounded
+			//! grace is affordable here (no drawDoneRelease deadline) and
+			//! process teardown must not race a live write loop.
+			if(mainWindow)
+				mainWindow->abortFlowForExit();
 			exitApplication = true;
 			break;
 		}
@@ -170,28 +196,89 @@ bool Application::procUI(void)
 				video->tvEnable(true);
 				video->drcEnable(true);
 				
-				log_printf("delete fontSystem\n");
-				delete fontSystem;
-				fontSystem = nullptr;
-				
-				log_printf("delete video\n");
-				delete video;
-				video = nullptr;
-				
-				log_printf("deinitialize memory\n");
-				//! Queued deletions reference the exp heaps about to be
-				//! destroyed: hand them to the delete worker and wait (bounded)
-				//! for both queues to drain before releasing memory.
-				for(int i = 0; i < 200; i++)
+				//! Rebuilding is only safe once every deferred deletion has
+				//! actually run: a window queued by its own close handler is
+				//! still referenced by MainWindow's element lists until the
+				//! delete worker frees it, so hand the queues over and wait
+				//! (bounded) before deciding what this cycle can do.
+				bool rebuildUi = drainDeleteQueue();
+				if(!rebuildUi)
 				{
-					AsyncDeleter::triggerDeleteProcess();
-					if(AsyncDeleter::deleteQueueEmpty())
-						break;
-					usleep(5000);
-				}
-				if(!AsyncDeleter::deleteQueueEmpty())
+					//! Cannot prove the queued destructors have run; tearing
+					//! the UI down now could free memory under a pending
+					//! delete. Quit instead: process exit reclaims it all.
+					//! The writer still gets the cancel + bounded grace - a
+					//! stuck delete queue is no reason to abandon it mid-write.
 					log_printf("memory: delete queue drain timed out\n");
-				memoryRelease();
+					log_printf("foreground release with stuck delete queue: exiting\n");
+					if(mainWindow)
+					{
+						mainWindow->logFlowGate("stuck delete queue");
+						mainWindow->abortFlowForExit();
+					}
+					quit();
+				}
+				else if(mainWindow && !mainWindow->isFlowIdle())
+				{
+					//! An active flow owns windows its worker threads are
+					//! still writing to; a rebuild would pull them out from
+					//! under the workers. Stop the extraction worker, then
+					//! quit to the menu without tearing anything down.
+					mainWindow->logFlowGate("foreground release");
+					log_printf("foreground release during active flow: exiting\n");
+					mainWindow->abortFlowForExit();
+					quit();
+					rebuildUi = false;
+				}
+
+				if(rebuildUi)
+				{
+					//! The UI caches state that lives in the heaps torn down
+					//! here: every GuiText holds the font object from
+					//! construction and GuiImageData pixels are MEM1/bucket
+					//! allocations. Draw the old window after memoryRelease()
+					//! and the first frame reads freed memory (DSI on
+					//! resume). So tear the window down with the rest and let
+					//! the IN_FOREGROUND pass rebuild it - that is why its
+					//! creation is guarded on nullptr.
+					if(mainWindow)
+					{
+						log_printf("delete mainWindow\n");
+						delete mainWindow;
+						mainWindow = nullptr;
+					}
+
+					log_printf("delete fontSystem\n");
+					delete fontSystem;
+					fontSystem = nullptr;
+
+					log_printf("delete video\n");
+					delete video;
+					video = nullptr;
+
+					log_printf("deinitialize memory\n");
+					//! The window's own destructor just queued its image
+					//! data; those frees hit the exp heaps, so they must
+					//! settle before the release.
+					if(drainDeleteQueue())
+						memoryRelease();
+					else
+					{
+						log_printf("memory: delete queue drain timed out\n");
+						//! A delete worker caught between pop and finish
+						//! would free into a destroyed heap: keep the heaps
+						//! (memoryInitialize reuses surviving ones anyway).
+					}
+				}
+				else
+				{
+					//! Quit path: the loop tail's fadeOut() must not run once
+					//! ProcUIDrawDoneRelease() has handed the screen over, and
+					//! any live worker may still depend on the current
+					//! allocations. Detach the video instead of destroying it;
+					//! process exit reclaims everything.
+					video = nullptr;
+				}
 				ProcUIDrawDoneRelease();
 			}
 			else
