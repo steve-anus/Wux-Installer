@@ -13,7 +13,7 @@ in it:
 
 `yourgame.wux`    : the game dump; only the first `.wux` it finds is used, so keep one game at a time in there 
 `game.key`        : the disc key for that game, 16 bytes raw, or 32 hex characters  
-`common.key`      : your console's common key, the same for every game. 16 bytes raw, or 32 hex characters 
+`common.key`      : your console's common key. 16 bytes raw, or 32 hex characters 
 
 `wudump` is the only place it looks for these. The app also uses a folder named
 install in the card root for wup files. If you have wup files already, place them here under a subfolder to install them, so: /install/SomeName/
