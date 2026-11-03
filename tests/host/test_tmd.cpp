@@ -19,5 +19,8 @@ void testTmd() {
     t[0x1DE] = 0; t[0x1DF] = 1;
     t[0x18D] = 0x01;                            // not a Wii U title
     CHECK(wux::parseTmd(t.data(), t.size(), tmd) == wux::Error::BadMagic);
+    t[0x18C] = 0xFF; t[0x18D] = 0xFF;           // both 0005 bits set, but not 0005
+    CHECK(wux::parseTmd(t.data(), t.size(), tmd) == wux::Error::BadMagic);
+    t[0x18C] = 0x00; t[0x18D] = 0x05;
     CHECK(wux::parseTmd(t.data(), 0x100, tmd) == wux::Error::Truncated);
 }

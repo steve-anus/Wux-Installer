@@ -24,6 +24,9 @@ namespace wux {
 // Streams a .wux disc image (compressed .wud) without materializing the
 // full image. The index table (up to ~3 MB) is held in memory; each read maps a
 // virtual offset to the on-disk sector array and reads straight to the caller.
+// A full single-layer Wii U disc image is 0x5D3A00000 bytes.
+const U64 kMaxImageSize = 2 * 0x5D3A00000ULL;
+
 class WuxContainer {
 public:
     WuxContainer();

@@ -19,5 +19,7 @@ void testContainer();
 void testFst();
 void testTmd();
 void testTicket();
+void testKeyFile();
+void testChecked();
 
 #endif

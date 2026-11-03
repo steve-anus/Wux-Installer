@@ -24,6 +24,22 @@ void testAes() {
         CHECK(wux::aesCbcDecrypt(key.data(), iv.data(), ct.data(), 64, out.data()) == wux::Error::Ok);
         CHECK(out == pt);
     }
+    {   // decrypting in place gives the same result
+        std::vector<unsigned char> buf = ct;
+        CHECK(wux::aesCbcDecrypt(key.data(), iv.data(), buf.data(), 64, buf.data()) == wux::Error::Ok);
+        CHECK(buf == pt);
+    }
+    {   // the output may overlap the key or the IV (FIPS-197 C.1, zero IV)
+        std::vector<unsigned char> k1 = fromHex("000102030405060708090a0b0c0d0e0f");
+        std::vector<unsigned char> c1 = fromHex("69c4e0d86a7b0430d8cdb78070b4c55a");
+        std::vector<unsigned char> p1 = fromHex("00112233445566778899aabbccddeeff");
+        std::vector<unsigned char> buf = k1;
+        CHECK(wux::aesCbcDecrypt(buf.data(), zero.data(), c1.data(), 16, buf.data()) == wux::Error::Ok);
+        CHECK(buf == p1);
+        std::vector<unsigned char> ivbuf(16, 0);
+        CHECK(wux::aesCbcDecrypt(k1.data(), ivbuf.data(), c1.data(), 16, ivbuf.data()) == wux::Error::Ok);
+        CHECK(ivbuf == p1);
+    }
     {   // the IV is not modified
         std::vector<unsigned char> ivCopy = iv, out(64);
         wux::aesCbcDecrypt(key.data(), ivCopy.data(), ct.data(), 64, out.data());

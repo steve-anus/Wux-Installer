@@ -60,6 +60,23 @@ void testFst() {
         wux::Fst f;
         CHECK(f.parse(b.data(), b.size()) == wux::Error::Truncated);
     }
+    {   // many entries sharing one long name must not expand without bound
+        const unsigned entries = 8000;
+        std::vector<unsigned char> b = fstHeader(1);
+        const size_t ent = 0x40;
+        b.resize(ent + entries * 0x10, 0);
+        b[ent] = 1; putBE32(b, ent + 0x08, entries);
+        for (unsigned i = 1; i < entries; ++i) {
+            size_t e = ent + i * 0x10;
+            b[e + 3] = 1;                       // every file named by the same string
+            putBE32(b, e + 0x08, 1);
+        }
+        b.push_back(0);
+        b.insert(b.end(), 60000, 'n');          // one 60000-byte name
+        b.push_back(0);
+        wux::Fst f;
+        CHECK(f.parse(b.data(), b.size()) == wux::Error::Truncated);
+    }
     {   // bad signature
         std::vector<unsigned char> b = fstHeader(0);
         b[0] = 'X';

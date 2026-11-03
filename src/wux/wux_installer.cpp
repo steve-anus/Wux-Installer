@@ -36,6 +36,7 @@
 #include "wux/tmd.h"
 #include "wux/aes_cbc.h"
 #include "wux/ticket.h"
+#include "wux/key_file.h"
 #include "fs/fs_utils.h"
 #include "utils/logger.h"
 
@@ -77,107 +78,6 @@ std::string humanSize(U64 bytes) {
     if (n < 0) n = 0;
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
     return std::string(buf, (size_t)n);
-}
-
-// Read a whole file into `out`, in 64 KB chunks. Used only for small files (the 16-byte game.key);
-// the multi-GB .wux is streamed separately by WuxContainer, never read whole.
-// maxBytes caps the accepted size (0 = unlimited): a larger file is rejected
-// with Error::Truncated and, when tooLarge is given, reported through it so
-// the caller can name the reason.
-Error readWhole(const char* path, std::vector<U8>& out,
-                U64 maxBytes = 0,
-                bool* tooLarge = nullptr) {
-    int fd = ::open(path, O_RDONLY);
-    if (fd < 0)
-    {
-        // Missing vs. fault, decided via stat: this platform's POSIX layer
-        // does not set errno reliably, so stat is the referee.
-        struct stat probe;
-        return (::stat(path, &probe) != 0) ? Error::NotFound : Error::IoError;
-    }
-    out.clear();
-    // Heap buffer: this runs on the 192 KiB worker thread's stack (WuxExtractThread)
-    std::vector<U8> buf(0x10000);
-    for (;;) {
-        ssize_t n = ::read(fd, buf.data(), buf.size());
-        if (n < 0) { ::close(fd); return Error::IoError; }
-        if (n == 0) break;
-        if (maxBytes != 0 && (U64)out.size() + (U64)n > maxBytes) {
-            ::close(fd);
-            out.clear();
-            if (tooLarge) *tooLarge = true;
-            return Error::Truncated;
-        }
-        out.insert(out.end(), buf.data(), buf.data() + n);
-    }
-    ::close(fd);
-    return Error::Ok;
-}
-
-// Hex digit value (0-15), or -1 if not a hex digit.
-int hexVal(U8 c) {
-    if (c >= '0' && c <= '9') return (int)(c - '0');
-    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
-    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
-    return -1;
-}
-
-// Read a key file into a 16-byte key. Accepts either 16 raw bytes, or a
-// 32-char ASCII hex string. ASCII whitespace is ignored. On success key holds exactly 16 bytes.
-// reason (optional) gets a human-readable hint when the file is over-sized.
-Error parseKeyFile(const char* path, std::vector<U8>& key,
-                   std::string* reason = nullptr) {
-    std::vector<U8> raw;
-    bool tooLarge = false;
-    Error e = readWhole(path, raw, 4096, &tooLarge);
-    if (e != Error::Ok) {
-        if (reason) {
-            if (tooLarge) *reason = "file too large";
-            else if (e == Error::NotFound) *reason = "file not found";
-            else if (e == Error::IoError) *reason = "read error";
-        }
-        return e;
-    }
-    std::vector<U8> clean;
-    for (size_t i = 0; i < raw.size(); ++i) {
-        U8 b = raw[i];
-        if (b == ' ' || b == '\t' || b == '\r' || b == '\n') continue;
-        clean.push_back(b);
-    }
-    key.clear();
-    if (clean.size() == 16) {
-        // Ambiguity guard: 16 characters that are all hex digits are far
-        // more likely a truncated 32-char hex key than a raw key whose bytes
-        // happen to all fall in the hex-digit ranges. Reject and say exactly
-        // what to do about it.
-        bool allHex = true;
-        for (size_t i = 0; i < clean.size(); ++i)
-            if (hexVal(clean[i]) < 0) { allHex = false; break; }
-        if (allHex) {
-            key.clear();
-            if (reason) *reason = "16 hex characters - looks like a truncated 32-char hex key (enter all 32 characters, or save the raw 16 bytes)";
-            return Error::MissingKey;
-        }
-        key.assign(clean.begin(), clean.end());
-        return Error::Ok;
-    }
-    if (clean.size() == 32) {
-        key.resize(16);
-        for (int i = 0; i < 16; ++i) {
-            int hi = hexVal(clean[2 * i]);
-            int lo = hexVal(clean[2 * i + 1]);
-            if (hi < 0 || lo < 0) {
-                key.clear();
-                if (reason) *reason = "32 characters but not valid hex";
-                return Error::MissingKey;
-            }
-            key[i] = (U8)((hi << 4) | lo);
-        }
-        return Error::Ok;
-    }
-    key.clear();
-    if (reason) *reason = "expected 16 raw bytes or a 32-character hex string, got " + std::to_string(clean.size()) + " byte(s)";
-    return Error::MissingKey;
 }
 
 // Case-insensitive ASCII prefix test: does the C string a start with prefix?
@@ -240,10 +140,10 @@ struct WriteProgress {
 // time. If wp is non-null, its callback fires per written chunk.
 Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
                    const char* path, WriteProgress* wp) {
+    std::vector<U8> buf(fmt::kSectorSize);   // before the open: nothing to leak if it throws
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return Error::IoError;
 
-    std::vector<U8> buf(fmt::kSectorSize);
     U64 done = 0;
     while (done < size) {
         U64 chunk = size - done;
@@ -345,11 +245,25 @@ Error readPartitionHeader(const WuxContainer& c, U64 offset, U8 header[0x20]) {
 
 // The FST blob sits at volumeStart + FSTAddress * blockSize (header fields
 // +0x18 / +0x04).
-U64 fstOffset(const U8 header[0x20], U64 volumeStart) {
+// False when the offset does not fit in 64 bits.
+bool fstOffset(const U8 header[0x20], U64 volumeStart, U64& out) {
     U32 blockSize = readU32BE(header + 0x04);
     if (blockSize == 0) blockSize = fmt::kSectorSize;
     U32 fstAddress = readU32BE(header + 0x18);
-    return volumeStart + (U64)fstAddress * blockSize;
+    return addU64(volumeStart, (U64)fstAddress * blockSize, out);
+}
+
+// A name read from the image, made safe to show in a message box: printable
+// ASCII only, at most 40 characters.
+std::string displayName(const std::string& name) {
+    std::string out;
+    const size_t keep = name.size() > 40 ? 37 : name.size();
+    for (size_t i = 0; i < keep; ++i) {
+        char ch = name[i];
+        out.push_back(ch >= 0x20 && ch <= 0x7E ? ch : '?');
+    }
+    if (keep < name.size()) out += "...";
+    return out;
 }
 
 // Read + decrypt a file described by an FST entry (TMD/TIK/CERT). On-disc
@@ -371,7 +285,9 @@ Error getFstFile(const Fst& fst, const WuxContainer& c,
     // N*0x10000 within the section) is decrypted with IV = N (see makeOffsetIv).
     // The file sits at `entryOffset` bytes into the section, so we read the
     // enclosing 64 KiB block, decrypt the whole block, and copy the file's portion out of it.
-    const U64 sectionStart = partitionStart + (U64)sec->address * volBlockSize;
+    U64 sectionStart = 0;
+    if (!addU64(partitionStart, (U64)sec->address * volBlockSize, sectionStart))
+        return Error::Truncated;
     const U64 fileSize     = entry->fileSize;
     const U64 BLOCK        = kFstChunkSize;   // 0x10000
 
@@ -384,7 +300,8 @@ Error getFstFile(const Fst& fst, const WuxContainer& c,
     while (remaining > 0) {
         const U64 blockIndex  = pos / BLOCK;
         const U64 blockOffset = pos % BLOCK;
-        const U64 readOffset  = sectionStart + blockIndex * BLOCK;
+        U64 readOffset = 0;
+        if (!addU64(sectionStart, blockIndex * BLOCK, readOffset)) return Error::Truncated;
 
         U8 iv[16];
         makeOffsetIv(pos, iv);   // IV = (pos >> 16) == blockIndex for block-aligned pos
@@ -427,6 +344,28 @@ struct TitleData {
     Error code = Error::Ok;
     std::string errorText;
 };
+
+// Where TMD content c of a title sits in the image: offset and align16 size.
+// Error::NotFound when the GM FST has no section for it, Error::Truncated when
+// the range would wrap or run past the image.
+Error contentRange(const TitleData& td, const TmdContent& c, U64 imageSize,
+                   U64& offset, U64& size) {
+    bool ok = true;
+    if (c.index == 0) {
+        // content 0 (the FST) sits at FSTAddress * blockSize.
+        ok = addU64(td.gm->offset, (U64)readU32BE(td.gmHeader + 0x18) * td.gmBlockSize,
+                    offset);
+    } else {
+        const FstSection* sec = td.hasGmFst ? td.gmFst.section(c.index) : nullptr;
+        if (!sec) return Error::NotFound;
+        ok = addU64(td.gm->offset, (U64)sec->address * td.gmBlockSize, offset);
+    }
+    size = (c.encryptedFileSize + 15) & ~(U64)15;   // align16
+    if (size == 0) size = c.encryptedFileSize;
+    U64 end = 0;
+    if (!ok || !addU64(offset, size, end) || end > imageSize) return Error::Truncated;
+    return Error::Ok;
+}
 
 } // namespace
 
@@ -508,8 +447,12 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         if (siBlockSize == 0) siBlockSize = fmt::kSectorSize;
         U32 siFstSize = readU32BE(siHeader + 0x14);
         std::vector<U8> siFstBytes;
-        e = readFst(container, fstOffset(siHeader, si->offset), siFstSize,
-                    key.data(), siFstBytes);
+        U64 siFstOffset = 0;
+        if (!fstOffset(siHeader, si->offset, siFstOffset)) {
+            result.error = "SI FST: offset out of range";
+            return Error::Truncated;
+        }
+        e = readFst(container, siFstOffset, siFstSize, key.data(), siFstBytes);
         if (e != Error::Ok) {
             result.error = std::string("SI FST: ") + errorName(e);
             return e;
@@ -586,6 +529,15 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             // 6b. Parse the TMD.
             e = parseTmd(td.tmdBytes.data(), td.tmdBytes.size(), td.tmd);
             if (e != Error::Ok) { fail(e, "TMD: " + std::string(errorName(e))); continue; }
+            // No content can be larger than the whole image; checking it here
+            // keeps every later size sum and offset far from wrapping around.
+            {
+                bool oversized = false;
+                for (size_t i = 0; i < td.tmd.contents.size(); ++i)
+                    if (td.tmd.contents[i].encryptedFileSize > container.uncompressedSize())
+                        oversized = true;
+                if (oversized) { fail(Error::Truncated, "TMD: content larger than the image"); continue; }
+            }
             // Name the output folder by the TMD title ID (16 uppercase hex digits).
             td.outDir = std::string(outRoot) + "/" + titleIdHex(td.tmd.titleID);
 
@@ -639,7 +591,12 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
             if (gmFstSize > 0) {
                 std::vector<U8> gmFstBytes;
-                e = readFstChained(container, fstOffset(td.gmHeader, gm->offset),
+                U64 gmFstOffset = 0;
+                if (!fstOffset(td.gmHeader, gm->offset, gmFstOffset)) {
+                    fail(Error::Truncated, "GM FST: offset out of range");
+                    continue;
+                }
+                e = readFstChained(container, gmFstOffset,
                                    (U32)gmFstSize, td.contentKey.data(), gmFstBytes);
                 if (e != Error::Ok) { fail(e, "GM FST: " + std::string(errorName(e))); continue; }
                 e = td.gmFst.parse(gmFstBytes.data(), gmFstBytes.size());
@@ -651,6 +608,21 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 fail(Error::Truncated, "GM FST missing but the TMD has content beyond index 0");
                 continue;
             }
+            // Every content range is checked now, before pass 2 clears any
+            // earlier extraction of this title.
+            for (size_t i = 0; i < td.tmd.contents.size(); ++i) {
+                const TmdContent& c = td.tmd.contents[i];
+                U64 off = 0, size = 0;
+                Error re = contentRange(td, c, container.uncompressedSize(), off, size);
+                if (re == Error::NotFound) {
+                    fail(re, "content index out of range: " + std::to_string(c.index));
+                    break;
+                }
+                if (re != Error::Ok) {
+                    fail(re, "content runs past end of image: " + std::to_string(c.id));
+                    break;
+                }
+            }
         }
 
         // Count the good titles; if none, report the first error.
@@ -659,7 +631,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             if (!titles[t].error) ++goodTitles;
         if (goodTitles == 0) {
             const TitleData& first = titles[0];
-            result.error = std::string(titles[0].dir->name) + ": " +
+            result.error = displayName(titles[0].dir->name) + ": " +
                            (first.errorText.empty() ? std::string(errorName(first.code))
                                                     : first.errorText);
             return first.code;
@@ -826,28 +798,15 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             for (int i = 0; i < total; ++i) {
                 const TmdContent& c = td.tmd.contents[i];
 
-                U64 contentOffset;
-                if (c.index == 0) {
-                    // content 0 (the FST) sits at FSTAddress * blockSize.
-                    contentOffset = td.gm->offset + (U64)readU32BE(td.gmHeader + 0x18) *
-                                    td.gmBlockSize;
-                } else {
-                    const FstSection* sec = td.hasGmFst ? td.gmFst.section(c.index)
-                                                         : nullptr;
-                    if (!sec) {
-                        td.error = true;
-                        td.code = Error::NotFound;
-                        td.errorText = "content index out of range: " + std::to_string(c.index);
-                        break;
-                    }
-                    contentOffset = td.gm->offset + (U64)sec->address * td.gmBlockSize;
-                }
-                U64 appSize = (c.encryptedFileSize + 15) & ~(U64)15;  // align16
-                if (appSize == 0) appSize = c.encryptedFileSize;
-                if (contentOffset + appSize > container.uncompressedSize()) {
+                U64 contentOffset = 0, appSize = 0;
+                Error re = contentRange(td, c, container.uncompressedSize(),
+                                        contentOffset, appSize);
+                if (re != Error::Ok) {   // checked in pass 1; kept as a guard
                     td.error = true;
-                    td.code = Error::Truncated;
-                    td.errorText = "content runs past end of image: " + std::to_string(c.id);
+                    td.code = re;
+                    td.errorText = re == Error::NotFound
+                        ? "content index out of range: " + std::to_string(c.index)
+                        : "content runs past end of image: " + std::to_string(c.id);
                     break;
                 }
 
@@ -934,7 +893,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 if (!failedList.empty()) failedList += ", ";
                 // Bound per-name cost: a corrupt FST can yield a name up to
                 // the blob length; only the start is useful in this list.
-                failedList += titles[t].dir->name.substr(0, 32);
+                failedList += displayName(titles[t].dir->name);
                 if (failedList.size() > kNoteListCap) break;
             }
         }
@@ -951,7 +910,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             for (size_t t = 0; t < titles.size(); ++t) {
                 const TitleData& td = titles[t];
                 if (td.error) {
-                    result.error = std::string(td.dir->name) + ": " + td.errorText;
+                    result.error = displayName(td.dir->name) + ": " + td.errorText;
                     return td.code;
                 }
             }
@@ -988,7 +947,8 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         return Error::Ok;
     } catch (const std::bad_alloc&) {
         result.ok = false;
-        result.error = "out of memory parsing the disc image";
+        try { result.error = "out of memory parsing the disc image"; }
+        catch (...) { result.error.clear(); }   // the code below still says why
         return Error::AllocError;
     }
 }

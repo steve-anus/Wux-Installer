@@ -80,7 +80,7 @@ public:
 
     // Set by parse() when a corrupt nesting depth forced a subtree to be
     // dropped (the entry list is then truncated but still valid); the parse
-    // itself returns Ok so hardware-verified flows keep working.
+    // itself still returns Ok.
     bool depthTruncated = false;
 
     // data is the DECRYPTED FST blob. On success, sections and entries are

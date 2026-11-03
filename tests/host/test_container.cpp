@@ -83,6 +83,34 @@ void testContainer() {
         CHECK(c.read(0, 16, out) == wux::Error::BadEntryOffset);
         unlink(p.c_str());
     }
+    {   // reads stop at the declared size, not at the end of the last sector
+        std::string p = writeWux("partial.wux", S, 1, {0}, {a}, S);
+        wux::WuxContainer c;
+        CHECK(c.open(p.c_str()) == wux::Error::Ok);
+        unsigned char out[16];
+        CHECK(c.read(0, 1, out) == wux::Error::Ok);
+        CHECK(c.read(1, 16, out) == wux::Error::Truncated);
+        CHECK(c.read(0, 2, out) == wux::Error::Truncated);
+        unlink(p.c_str());
+    }
+    {   // an image larger than any disc, with a file big enough for its table
+        const unsigned long long size = 1ULL << 36;           // 64 GiB, 2M sectors
+        std::vector<unsigned> index((size_t)(size / S), 0);
+        std::string p = writeWux("big.wux", S, size, index, {a}, S);
+        wux::WuxContainer c;
+        CHECK(c.open(p.c_str()) == wux::Error::Truncated);
+        unlink(p.c_str());
+    }
+    {   // small sectors: the table limit counts sectors, not bytes of image
+        const unsigned small = 0x200;
+        const unsigned long long size = 1ULL << 30;          // 2M sectors, 8 MiB table
+        std::vector<unsigned> index((size_t)(size / small), 0);
+        std::vector<unsigned char> s(small, 'S');
+        std::string p = writeWux("small.wux", small, size, index, {s}, small);
+        wux::WuxContainer c;
+        CHECK(c.open(p.c_str()) == wux::Error::Truncated);
+        unlink(p.c_str());
+    }
     {   // wrong magic
         std::string p = writeWux("magic.wux", S, S, {0}, {a}, S);
         FILE* fp = std::fopen(p.c_str(), "r+b");

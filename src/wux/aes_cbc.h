@@ -1,5 +1,5 @@
 /*
- * wuxinstaller - AES-128 CBC decryption (self-contained, no external crypto)
+ * wuxinstaller - AES-128 CBC decryption, through tiny-AES-c.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@ const size_t AesBlock      = 16;
 //   key   : 16-byte key
 //   iv    : 16-byte initialization vector (16 zero bytes for TOC/FST; the
 //           offset-derived IV for TMD/TIK/CERT, see wux::makeOffsetIv)
-//   in/out: inLen bytes; in and out must not alias
+//   in/out: inLen bytes; out may be the same buffer as in, key or iv
 // Returns Error::Ok, or Error::DecryptError if inLen is not a multiple of 16.
 Error aesCbcDecrypt(const U8* key, const U8* iv,
                     const U8* in, size_t inLen, U8* out);

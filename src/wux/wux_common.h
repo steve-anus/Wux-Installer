@@ -87,6 +87,19 @@ inline U64 readU64BE(const U8* p) {
     return ((U64)readU32BE(p) << 32) | (U64)readU32BE(p + 4);
 }
 
+// a + b and a * b for sizes and offsets taken from the image: false when the
+// result does not fit in 64 bits, so a crafted value cannot wrap around.
+inline bool addU64(U64 a, U64 b, U64& r) {
+    if (b > ~(U64)0 - a) return false;
+    r = a + b;
+    return true;
+}
+inline bool mulU64(U64 a, U64 b, U64& r) {
+    if (a != 0 && b > ~(U64)0 / a) return false;
+    r = a * b;
+    return true;
+}
+
 // Build the offset-derived CBC IV used for TMD/TIK/CERT (and hashed content):
 // bytes 0-7 are zero, bytes 8-15 hold (fileOffsetBytes >> 16) big-endian.
 // fileOffsetBytes is the FST entry's file offset in bytes.

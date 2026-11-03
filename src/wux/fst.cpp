@@ -33,20 +33,28 @@ std::string readName(const U8* data, size_t len, size_t nameOff, U32 nameOffset)
 // Parse entries in slot range [i, end) as children of parentPath. The entry
 // table is laid out depth-first; a directory's 0x08 field holds the absolute
 // slot index where its subtree ends.
-void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
+// Every entry stores its name and full path, so a crafted table could make
+// one long string count many times over; parsing stops past this many bytes.
+// Far above what a real disc needs (a 16 MiB FST of short paths stays well
+// below it).
+const size_t kMaxNameBytes = 128u << 20;
+
+// Returns false once the name budget is spent.
+bool parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
                 int i, int end, const std::string& parentPath,
-                std::vector<FstEntry>& out, int depth, bool* depthTruncated) {
+                std::vector<FstEntry>& out, int depth, bool* depthTruncated,
+                size_t& nameBytes) {
     if (depth > 32) {
         // Corrupt nesting must not exhaust the stack. The entry at the
         // 33rd level itself was already recorded by its parent; only its
         // subtree is dropped here, and depthTruncated carries it into the
         // final note.
         if (depthTruncated) *depthTruncated = true;
-        return;
+        return true;
     }
     while (i < end) {
         const U8* e = data + entOff + (size_t)i * 0x10;
-        if (e + 0x10 > data + len) return;   // bounds guard
+        if (e + 0x10 > data + len) return true;   // bounds guard
 
         U32 raw04        = readU32BE(e + 0x04);
         U32 raw08        = readU32BE(e + 0x08);
@@ -54,6 +62,8 @@ void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
         U32 nameOffset   = ((U32)e[1] << 16) | ((U32)e[2] << 8) | (U32)e[3];
 
         std::string name = readName(data, len, strOff, nameOffset);
+        nameBytes += name.size() + parentPath.size() + name.size();
+        if (nameBytes > kMaxNameBytes) return false;
         std::string path = parentPath + name;
 
         FstEntry en;
@@ -71,8 +81,9 @@ void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
             U32 sub = raw08;
             if ((U64)sub > (U64)end) sub = (U32)end;
             if (sub > (U32)(i + 1)) {
-                parseRange(data, len, entOff, strOff, i + 1, (int)sub,
-                           path + "/", out, depth + 1, depthTruncated);
+                if (!parseRange(data, len, entOff, strOff, i + 1, (int)sub,
+                                path + "/", out, depth + 1, depthTruncated, nameBytes))
+                    return false;
                 i = (int)sub;
             } else {
                 ++i;
@@ -84,6 +95,7 @@ void parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
             ++i;
         }
     }
+    return true;
 }
 
 } // namespace
@@ -131,8 +143,12 @@ Error Fst::parse(const U8* data, size_t len) {
     if (candidate > (U64)len) return Error::Truncated;
     const size_t strOff = (size_t)candidate;
 
-    parseRange(data, len, entOff, strOff, 1, (int)lastEntryNumber,
-               std::string(), entries, 0, &depthTruncated);
+    size_t nameBytes = 0;
+    if (!parseRange(data, len, entOff, strOff, 1, (int)lastEntryNumber,
+                    std::string(), entries, 0, &depthTruncated, nameBytes)) {
+        entries.clear();
+        return Error::Truncated;
+    }
     return Error::Ok;
 }
 

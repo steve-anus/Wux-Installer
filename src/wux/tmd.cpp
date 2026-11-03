@@ -36,7 +36,7 @@ Error parseTmd(const U8* data, size_t len, Tmd& out) {
     if (len < 0x204) return Error::Truncated;
 
     out.titleID = readU64BE(data + 0x18C);
-    if ((out.titleID & 0x0005000000000000ULL) != 0x0005000000000000ULL)
+    if ((out.titleID >> 48) != 0x0005)
         return Error::BadMagic;   // not a Wii U (0005xxxx) title
     out.contentCount = readU16BE(data + 0x1DE);
 

@@ -59,13 +59,18 @@ Error WuxContainer::open(const char* path) {
     }
     sectorSize_ = readU32LE(header + 0x08);
     uncompressedSize_ = readU64LE(header + 0x10);
-    // Every known image uses 32 KiB sectors; any power of two from 512 B to
-    // 1 MiB keeps the alignment below exact, anything else is not a .wux.
+    // Every known image uses 32 KiB sectors. This reader supports any power
+    // of two from 512 B to 1 MiB, which keeps the alignment below exact; other
+    // sizes are refused.
     if (sectorSize_ < 0x200 || sectorSize_ > 0x100000 ||
         (sectorSize_ & (sectorSize_ - 1)) != 0) {
         close();
         return Error::BadMagic;
     }
+
+    // No disc image is larger than a full Wii U disc; twice that, counted in
+    // 32 KiB sectors, bounds the index table at 6 MiB whatever the sector size.
+    if (uncompressedSize_ > kMaxImageSize) { close(); return Error::Truncated; }
 
     sectorCount_ = uncompressedSize_ / sectorSize_ +
                    (uncompressedSize_ % sectorSize_ != 0 ? 1 : 0);
@@ -73,6 +78,7 @@ Error WuxContainer::open(const char* path) {
     // Index table lives at 0x20 (one 4-byte LE entry per sector); the sector
     // array follows, aligned up to a full sector. The table must fit in the
     // file: checked by division so a huge declared size cannot wrap.
+    if (sectorCount_ > kMaxImageSize / 0x8000) { close(); return Error::Truncated; }
     if (sectorCount_ > (fileSize_ - sizeof(header)) / 4) { close(); return Error::Truncated; }
     U64 indexTableSize = sectorCount_ * 4;
     sectorArrayOffset_ = 0x20 + indexTableSize;
@@ -93,6 +99,8 @@ Error WuxContainer::open(const char* path) {
 
 Error WuxContainer::read(U64 offset, size_t len, U8* out) const {
     if (fd_ < 0 || !out) return Error::IoError;
+    if (offset > uncompressedSize_ || len > uncompressedSize_ - offset)
+        return Error::Truncated;
 
     U64 left = len;
     U64 off = offset;
