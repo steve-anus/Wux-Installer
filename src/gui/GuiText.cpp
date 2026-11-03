@@ -346,7 +346,9 @@ void GuiText::makeDottedText()
 		return;
 	}
 
-	while (text[i])
+	// The buffer holds maxWidth characters; characters the font cannot draw
+	// have no width, so the pixel test alone could run past its end.
+	while (text[i] && i + 2 < maxWidth)
 	{
 		currentWidth += font->getCharWidth(text[i], currentSize, i > 0 ? text[i - 1] : 0);
 		if (currentWidth >= maxWidth && i > 2)
@@ -379,7 +381,7 @@ void GuiText::scrollText(u32 frameCount)
 			return;
 		}
 
-		while (text[i] && currentWidth < maxWidth)
+		while (text[i] && currentWidth < maxWidth && i + 1 < maxWidth)
 		{
 			textDyn[pos][i] = text[i];
 
@@ -425,7 +427,7 @@ void GuiText::scrollText(u32 frameCount)
 
 	int i = 0, currentWidth = 0;
 
-	while (currentWidth < maxWidth)
+	while (currentWidth < maxWidth && i + 4 < maxWidth)
 	{
 		if (ch > stringlen - 1)
 		{
@@ -460,6 +462,9 @@ void GuiText::wrapText()
 	int lastSpaceIndex = -1;
 	int currentWidth = 0;
 
+	if (maxWidth < 4)
+		return;
+
 	while (text[ch] && linenum < linestodraw)
 	{
 		if (linenum >= (int) textDyn.size())
@@ -477,7 +482,9 @@ void GuiText::wrapText()
 
 		currentWidth += font->getCharWidth(text[ch], currentSize, ch > 0 ? text[ch - 1] : 0x0000);
 
-		if (currentWidth >= maxWidth || (text[ch] == '\n'))
+		// Also break when the line buffer (maxWidth characters) is nearly
+		// full: undrawable characters have no width.
+		if (currentWidth >= maxWidth || (text[ch] == '\n') || i + 3 >= maxWidth)
 		{
             if(text[ch] == '\n')
             {
