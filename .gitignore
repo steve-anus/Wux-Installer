@@ -7,3 +7,4 @@
 src/resources/filelist.h
 pc_tests
 /tests/host/build/
+/tests/host/lifecycle/build/
