@@ -57,6 +57,13 @@ void testContainer() {
         CHECK(c.open(p.c_str()) != wux::Error::Ok);
         unlink(p.c_str());
     }
+    {   // a power-of-two sector size below the 512-byte minimum, small image
+        std::vector<unsigned char> s(0x100, 'T');
+        std::string p = writeWux("tiny.wux", 0x100, 0x100, {0}, {s}, 0x100);
+        wux::WuxContainer c;
+        CHECK(c.open(p.c_str()) == wux::Error::BadMagic);
+        unlink(p.c_str());
+    }
     {   // sector size that is not a power of two
         std::string p = writeWux("odd.wux", 0x6000, 0x6000, {0}, {a}, 0x6000);
         wux::WuxContainer c;
@@ -97,6 +104,16 @@ void testContainer() {
         const unsigned long long size = 1ULL << 36;           // 64 GiB, 2M sectors
         std::vector<unsigned> index((size_t)(size / S), 0);
         std::string p = writeWux("big.wux", S, size, index, {a}, S);
+        wux::WuxContainer c;
+        CHECK(c.open(p.c_str()) == wux::Error::Truncated);
+        unlink(p.c_str());
+    }
+    {   // 64 GiB in 1 MiB sectors: few enough sectors, but over the image cap
+        const unsigned big = 0x100000;
+        const unsigned long long size = 1ULL << 36;           // 65,536 sectors
+        std::vector<unsigned> index((size_t)(size / big), 0);
+        std::vector<unsigned char> s(big, 'M');
+        std::string p = writeWux("bigsector.wux", big, size, index, {s}, big);
         wux::WuxContainer c;
         CHECK(c.open(p.c_str()) == wux::Error::Truncated);
         unlink(p.c_str());

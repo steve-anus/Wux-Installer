@@ -39,7 +39,8 @@ std::string readName(const U8* data, size_t len, size_t nameOff, U32 nameOffset)
 // below it).
 const size_t kMaxNameBytes = 128u << 20;
 
-// Returns false once the name budget is spent.
+// Returns false once the name budget is spent, or for a name holding '/'
+// (it would be read as a deeper path and hide the entry from the walk).
 bool parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
                 int i, int end, const std::string& parentPath,
                 std::vector<FstEntry>& out, int depth, bool* depthTruncated,
@@ -62,6 +63,7 @@ bool parseRange(const U8* data, size_t len, size_t entOff, size_t strOff,
         U32 nameOffset   = ((U32)e[1] << 16) | ((U32)e[2] << 8) | (U32)e[3];
 
         std::string name = readName(data, len, strOff, nameOffset);
+        if (name.find('/') != std::string::npos) return false;
         nameBytes += name.size() + parentPath.size() + name.size();
         if (nameBytes > kMaxNameBytes) return false;
         std::string path = parentPath + name;

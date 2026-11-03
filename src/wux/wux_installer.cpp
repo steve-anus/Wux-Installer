@@ -625,6 +625,21 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
         }
 
+        // Two titles with one title ID would share an output folder: the later
+        // one fails, so neither can remove the other's files and the disc
+        // does not count as complete.
+        for (size_t t = 1; t < titles.size(); ++t) {
+            if (titles[t].error) continue;
+            for (size_t u = 0; u < t; ++u) {
+                if (!titles[u].error && titles[u].outDir == titles[t].outDir) {
+                    titles[t].error = true;
+                    titles[t].code = Error::AlreadyExists;
+                    titles[t].errorText = "same title ID as an earlier title";
+                    break;
+                }
+            }
+        }
+
         // Count the good titles; if none, report the first error.
         int goodTitles = 0;
         for (size_t t = 0; t < titles.size(); ++t)
@@ -715,21 +730,15 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 }
             }
         }
-        // Fresh extraction: clear any previous output for these title folders
-        // before writing, so a re-run can never merge stale files into the new
-        // extract or hit same-named files mid-stream. Runs after the free-space
-        // guard on purpose: the old data still occupies its blocks while the
-        // guard checks, and a failed removal fails only that title.
-        // No cancel checkpoint here: this loop DESTROYS each title's previous
-        // extraction before pass 2 replaces it, so stopping mid-loop could
-        // leave earlier titles deleted and unreplaced. The last checkpoint
-        // (the tally loop above) already covers the "before any destruction"
-        // boundary, and this loop is filesystem-fast, not image-scaled.
-        for (size_t t = 0; t < titles.size(); ++t) {
-            TitleData& td = titles[t];
-            if (td.error) continue;
+        // Fresh extraction: a title's previous output is cleared right before
+        // that title is written (in the loop below, after its cancel
+        // checkpoint), so a re-run never merges stale files and a cancel leaves
+        // every title not yet started as it was. The free-space guard above ran
+        // while the old data still held its blocks. A failed removal fails
+        // only that title.
+        auto clearPrevious = [&](TitleData& td) {
             struct stat st;
-            if (::stat(td.outDir.c_str(), &st) != 0) continue;   // nothing to clear
+            if (::stat(td.outDir.c_str(), &st) != 0) return true;   // nothing to clear
             if (!S_ISDIR(st.st_mode)) {
                 // A file squats on the folder name; clear it, fail the title
                 // if the removal does not stick.
@@ -738,16 +747,17 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                     td.error = true;
                     td.code = Error::IoError;
                     td.errorText = "cannot clear the file squatting on " + td.outDir;
-                    continue;
+                    return false;
                 }
             } else if (RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0) {
                 td.error = true;
                 td.code = Error::IoError;
                 td.errorText = "cannot remove the previous " + td.outDir +
                                "; delete that folder and retry";
-                continue;
+                return false;
             }
-        }
+            return true;
+        };
 
         int doneContents = 0;
 
@@ -779,6 +789,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
             TitleData& td = titles[t];
             if (td.error) continue;
+            if (!clearPrevious(td)) continue;
 
             dirErr = ensureDir(td.outDir.c_str());
             if (dirErr != Error::Ok) {

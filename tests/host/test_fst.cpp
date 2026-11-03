@@ -34,6 +34,18 @@ void testFst() {
         CHECK(e != nullptr && !e->isDir && e->fileSize == 9);
         CHECK(f.rootDirChildren().size() == 1);
     }
+    {   // a name holding '/' would hide the entry from the root walk
+        std::vector<unsigned char> b = fstHeader(1);
+        b.resize(0x20 + 0x20 + 2 * 0x10, 0);
+        const size_t ent = 0x40;
+        b[ent] = 1; putBE32(b, ent + 0x08, 2);                       // root, 2 entries
+        b[ent + 0x10] = 1; b[ent + 0x13] = 1; putBE32(b, ent + 0x18, 2);  // dir "a/b"
+        const char names[] = "\0a/b\0";
+        b.insert(b.end(), names, names + sizeof(names));
+        wux::Fst f;
+        CHECK(f.parse(b.data(), b.size()) == wux::Error::Truncated);
+        CHECK(f.rootDirChildren().empty());
+    }
     {   // section count with the top bit set must not pass the sanity cap
         std::vector<unsigned char> b = fstHeader(0xFFFFFFFFu);
         b.resize(0x400, 0);
