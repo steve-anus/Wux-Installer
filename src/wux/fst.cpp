@@ -100,8 +100,9 @@ Error Fst::parse(const U8* data, size_t len) {
 
     sectionBlockSize = readU32BE(data + 0x04);
     if (sectionBlockSize == 0) sectionBlockSize = fmt::kSectorSize;
-    sectionCount = (int)readU32BE(data + 0x08);
-    if (sectionCount > 1024) return Error::Truncated;   // sanity cap
+    const U32 rawSectionCount = readU32BE(data + 0x08);
+    if (rawSectionCount > 1024) return Error::Truncated;   // sanity cap
+    sectionCount = (int)rawSectionCount;
 
     // Section table at 0x20: sectionCount entries of 32 bytes.
     const size_t secOff = 0x20;
