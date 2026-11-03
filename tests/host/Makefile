@@ -12,13 +12,20 @@ MODULES  := aes_cbc wux_container wud_toc fst tmd ticket key_file
 OBJS     := $(addprefix build/,$(addsuffix .o,$(MODULES))) build/tiny_aes.o
 CFLAGS   := -std=c11 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 \
             -fsanitize=address,undefined -fno-sanitize-recover=all -MMD -MP
-TESTS    := $(patsubst %.cpp,build/%.o,$(wildcard test_*.cpp))
+TESTS    := $(patsubst %.cpp,build/%.o,$(filter-out test_guitext.cpp,$(wildcard test_*.cpp)))
+
+# GuiText and GuiElement build against the stand-ins in gui_stubs/ (searched
+# before src/) and glm from the console toolchain's portlibs (header-only).
+DEVKITPRO ?= /opt/devkitpro
+GUIFLAGS := $(filter-out -I$(SRC),$(CXXFLAGS)) -Wno-unused-parameter -Igui_stubs \
+            -I$(SRC) -idirafter $(DEVKITPRO)/portlibs/ppc/include
+GUIOBJS  := build/GuiText.o build/GuiElement.o build/test_guitext.o
 
 .PHONY: run clean
 run: build/host_tests
 	./build/host_tests
 
-build/host_tests: $(OBJS) $(TESTS)
+build/host_tests: $(OBJS) $(TESTS) $(GUIOBJS)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 build/%.o: $(SRC)/wux/%.cpp | build
@@ -29,6 +36,12 @@ build/tiny_aes.o: $(SRC)/wux/tiny_aes.c | build
 
 build/test_%.o: test_%.cpp check.h | build
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+build/Gui%.o: $(SRC)/gui/Gui%.cpp | build
+	$(CXX) $(GUIFLAGS) -c $< -o $@
+
+build/test_guitext.o: test_guitext.cpp check.h | build
+	$(CXX) $(GUIFLAGS) -c $< -o $@
 
 build:
 	mkdir -p build

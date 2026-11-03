@@ -49,12 +49,16 @@ it. `make clean` removes build output.
 
 ## Tests
 
-The code that reads and decrypts `.wux` images has host tests that run on a PC
-under AddressSanitizer and UndefinedBehaviorSanitizer:
+The code that reads and decrypts `.wux` images, its file cleanup, and the GUI
+text layout have host tests that run on a PC under AddressSanitizer and
+UndefinedBehaviorSanitizer:
 
 ```sh
 make -C tests/host
 ```
+
+The GUI test builds against the stand-in headers in `tests/host/gui_stubs`
+and needs devkitPro installed (for glm).
 
 Before publishing a build, `make leakcheck` searches the `.wuhb`, and the code
 inside it, for your home folder path and your account name, and fails if it

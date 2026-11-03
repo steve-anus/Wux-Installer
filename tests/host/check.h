@@ -22,5 +22,6 @@ void testTicket();
 void testKeyFile();
 void testChecked();
 void testCleanup();
+void testGuiText();
 
 #endif

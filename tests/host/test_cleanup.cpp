@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 // Allocation failure on demand: the next g_allocsLeft calls to operator new
-// succeed, the one after throws std::bad_alloc. -1 never fails.
+// succeed, the one after throws std::bad_alloc (nothrow forms return null).
+// -1 never fails. Every unaligned new and delete form is replaced, so both
+// sides of each pair come from here.
 static long g_allocsLeft = -1;
 
 void* operator new(std::size_t n) {
@@ -23,6 +25,12 @@ void* operator new(std::size_t n) {
     return p;
 }
 void* operator new[](std::size_t n) { return operator new(n); }
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+    try { return operator new(n); } catch (const std::bad_alloc&) { return nullptr; }
+}
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
+    return operator new(n, std::nothrow);
+}
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
