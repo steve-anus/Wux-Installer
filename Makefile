@@ -162,12 +162,16 @@ $(BUILD):
 # since the rpx stores its sections compressed) must not carry the builder's
 # home path or account name.
 leakcheck: $(BUILD)
+	@[ -n "$(HOME)" ] && [ -n "$(USER)" ] || { echo "leakcheck: HOME and USER must be set" >&2; exit 1; }
 	@$(DEVKITPPC)/bin/powerpc-eabi-objcopy --strip-debug $(TARGET).elf $(BUILD)/leakcheck.elf
 	@for f in $(TARGET).wuhb $(BUILD)/leakcheck.elf; do \
-		if grep -a -q -F -e "$(HOME)" -e "$(USER)" "$$f"; then \
+		grep -a -q -F -e "$(HOME)" -e "$(USER)" "$$f"; rc=$$?; \
+		if [ $$rc -eq 0 ]; then \
 			echo "leakcheck: $$f carries the builder's home path or account name" >&2; \
-			rm -f $(BUILD)/leakcheck.elf; exit 1; \
+		elif [ $$rc -ne 1 ]; then \
+			echo "leakcheck: could not scan $$f" >&2; \
 		fi; \
+		if [ $$rc -ne 1 ]; then rm -f $(BUILD)/leakcheck.elf; exit 1; fi; \
 	done
 	@rm -f $(BUILD)/leakcheck.elf
 	@echo "leakcheck: $(TARGET).wuhb clean"

@@ -56,8 +56,9 @@ under AddressSanitizer and UndefinedBehaviorSanitizer:
 make -C tests/host
 ```
 
-Before publishing a build, `make leakcheck` confirms that the `.wuhb` holds no
-path from your home folder and not your account name.
+Before publishing a build, `make leakcheck` searches the `.wuhb`, and the code
+inside it, for your home folder path and your account name, and fails if it
+finds either.
 
 ## Credits
 
