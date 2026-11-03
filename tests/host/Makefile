@@ -16,7 +16,9 @@ TESTS    := $(patsubst %.cpp,build/%.o,$(filter-out test_guitext.cpp,$(wildcard 
 
 # GuiText and GuiElement build against the stand-ins in gui_stubs/ (searched
 # before src/) and glm from the console toolchain's portlibs (header-only).
-DEVKITPRO ?= /opt/devkitpro
+ifeq ($(strip $(DEVKITPRO)),)
+$(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
+endif
 GUIFLAGS := $(filter-out -I$(SRC),$(CXXFLAGS)) -Wno-unused-parameter -Igui_stubs \
             -I$(SRC) -idirafter $(DEVKITPRO)/portlibs/ppc/include
 GUIOBJS  := build/GuiText.o build/GuiElement.o build/test_guitext.o

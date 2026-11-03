@@ -35,8 +35,8 @@ wchar_t* FreeTypeGX::charToWideChar(const char*) { return nullptr; }
 char* FreeTypeGX::wideCharToUTF8(const wchar_t*) { return nullptr; }
 extern "C" void log_printf(const char*, ...) {}
 
-// The reproduction from ticket T10: a long run of undrawable characters,
-// then enough wide text that the line must be shortened.
+// A long run of undrawable characters, then enough wide text that the line
+// must be shortened.
 static std::wstring hostileText(size_t zeroWidth) {
     std::wstring t(zeroWidth, (wchar_t)0x01);
     for (int i = 0; i < 4; ++i) t += L"WIDE TEXT THAT DOES NOT FIT ";
