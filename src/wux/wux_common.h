@@ -21,10 +21,10 @@
 #include <cstddef>
 #include <cstring>
 
-#define U8 uint8_t
-#define U16 uint16_t
-#define U32 uint32_t
-#define U64 uint64_t
+using U8  = std::uint8_t;
+using U16 = std::uint16_t;
+using U32 = std::uint32_t;
+using U64 = std::uint64_t;
 
 namespace wux {
 
@@ -41,7 +41,7 @@ enum class Error {
     NotFound,        // file or partition not present
     MissingKey,      // game.key absent or not 16 bytes
     NoSpace,         // not enough free space for the extracted files
-    NotSupported,
+    AlreadyExists,   // a same-named file blocks a folder we must create
     Cancelled        // streaming stopped on request (ProgressFn returned false)
 };
 
@@ -58,7 +58,7 @@ inline const char* errorName(Error e) {
         case Error::NotFound:      return "not found";
         case Error::MissingKey:    return "key not usable";
         case Error::NoSpace:       return "not enough free space";
-        case Error::NotSupported:  return "a same-named file exists on the card";
+        case Error::AlreadyExists: return "a same-named file exists on the card";
         case Error::Cancelled:     return "cancelled";
         default:                   return "unknown";
     }

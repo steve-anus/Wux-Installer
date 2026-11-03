@@ -217,10 +217,10 @@ Error ensureDir(const char* path) {
     bool exists = (::stat(path, &st) == 0);
     // A same-named regular file is not "the directory already exists":
     // accepting it here would surface later as a misleading i/o error.
-    if (exists && !S_ISDIR(st.st_mode)) return Error::NotSupported;
+    if (exists && !S_ISDIR(st.st_mode)) return Error::AlreadyExists;
     if (::mkdir(path, 0777) == 0) return Error::Ok;                    // created
     if (::stat(path, &st) != 0) return Error::IoError;
-    return S_ISDIR(st.st_mode) ? Error::Ok : Error::NotSupported;
+    return S_ISDIR(st.st_mode) ? Error::Ok : Error::AlreadyExists;
 }
 
 // Progress state shared with the writer loop (see extract()). The callback
@@ -552,7 +552,6 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             }
             TitleData& td = titles[t];
             td.dir = titleDirs[t];
-            td.outDir = std::string(outRoot) + "/" + td.dir->name;
             auto fail = [&td](Error err, const std::string& msg) {
                 td.error = true;
                 td.code = err;
