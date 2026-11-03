@@ -37,6 +37,7 @@
 #include "wux/aes_cbc.h"
 #include "wux/ticket.h"
 #include "wux/key_file.h"
+#include "wux/cleanup_guard.h"
 #include "fs/fs_utils.h"
 #include "utils/logger.h"
 
@@ -98,16 +99,16 @@ bool nameStartsWith(const char* a, const std::string& prefix) {
 Error writeWhole(const char* path, const U8* data, size_t len) {
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return Error::IoError;
+    FileGuard file(fd, path);
     size_t left = len;
     const U8* p = data;
     while (left > 0) {
-        ssize_t n = ::write(fd, p, left);
-        if (n <= 0) { ::close(fd); ::unlink(path); return Error::IoError; }
+        ssize_t n = ::write(file.fd(), p, left);
+        if (n <= 0) return Error::IoError;
         p += (size_t)n;
         left -= (size_t)n;
     }
-    if (::close(fd) != 0) { ::unlink(path); return Error::IoError; }
-    return Error::Ok;
+    return file.commit() ? Error::Ok : Error::IoError;
 }
 
 // Create a directory, treating "already exists" as success. Relies on stat
@@ -137,24 +138,26 @@ struct WriteProgress {
 };
 
 // Stream size bytes from the container into a file, one 32 KB sector at a
-// time. If wp is non-null, its callback fires per written chunk.
+// time. If wp is non-null, its callback fires per written chunk. Any failed
+// exit, an exception included, leaves no partial file.
 Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
                    const char* path, WriteProgress* wp) {
-    std::vector<U8> buf(fmt::kSectorSize);   // before the open: nothing to leak if it throws
+    std::vector<U8> buf(fmt::kSectorSize);
     int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return Error::IoError;
+    FileGuard file(fd, path);
 
     U64 done = 0;
     while (done < size) {
         U64 chunk = size - done;
         if (chunk > buf.size()) chunk = buf.size();
         Error e = c.read(offset + done, (size_t)chunk, buf.data());
-        if (e != Error::Ok) { ::close(fd); ::unlink(path); return e; }
+        if (e != Error::Ok) return e;
         const U8* p = buf.data();
         size_t left = (size_t)chunk;
         while (left > 0) {
-            ssize_t n = ::write(fd, p, left);
-            if (n <= 0) { ::close(fd); ::unlink(path); return Error::IoError; }
+            ssize_t n = ::write(file.fd(), p, left);
+            if (n <= 0) return Error::IoError;
             p += (size_t)n;
             left -= (size_t)n;
         }
@@ -165,14 +168,11 @@ Error streamToFile(const WuxContainer& c, U64 offset, U64 size,
                         wp->doneBytes, wp->totalBytes, wp->user)) {
                 // The listener asked us to stop: drop the partial file the
                 // same way a write error would and report the cancel.
-                ::close(fd);
-                ::unlink(path);
                 return Error::Cancelled;
             }
         }
     }
-    if (::close(fd) != 0) { ::unlink(path); return Error::IoError; }
-    return Error::Ok;
+    return file.commit() ? Error::Ok : Error::IoError;
 }
 
 // Read + decrypt a partition's FST into out.
@@ -787,12 +787,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
                 td.errorText = std::string("create ") + td.outDir + ": " + errorName(dirErr);
                 continue;
             }
-            // Partial output to clean on any later failure: ensureDir above
-            // succeeded, so this title owns the folder on the card.
-            auto clearPartial = [&]() {
-                if (RemoveDirectoryAndEmptyParents(td.outDir.c_str(), outRoot) != 0)
-                    log_printf("WUX: could not clear partial folder %s", td.outDir.c_str());
-            };
+            // ensureDir above succeeded, so this title owns the folder on the
+            // card: every exit from this iteration other than success
+            // (failure, cancel, an exception) removes it.
+            FolderGuard partial(td.outDir.c_str(), outRoot);
 
             int total = (int)td.tmd.contents.size();
             for (int i = 0; i < total; ++i) {
@@ -851,28 +849,25 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
 
                 doneContents++;
             }
-            if (td.error) { clearPartial(); continue; }
+            if (td.error) continue;
 
             // 9. Decrypted metadata.
             e = writeWhole((td.outDir + "/title.tmd").c_str(), td.tmdBytes.data(), td.tmdBytes.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.tmd: ") + errorName(e);
-                clearPartial();
                 continue;
             }
             e = writeWhole((td.outDir + "/title.tik").c_str(), td.tik.data(), td.tik.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.tik: ") + errorName(e);
-                clearPartial();
                 continue;
             }
             e = writeWhole((td.outDir + "/title.cert").c_str(), td.cert.data(), td.cert.size());
             if (e != Error::Ok) {
                 td.error = true; td.code = e;
                 td.errorText = std::string("write title.cert: ") + errorName(e);
-                clearPartial();
                 continue;
             }
 
@@ -883,6 +878,7 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
             result.outDirs.push_back(td.outDir);
             result.titleCount++;
             result.contentCount += total;
+            partial.keep();
         }
 
         // Titles that ended up skipped (pass 1 or pass 2), named only when at

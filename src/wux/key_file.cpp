@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "wux/key_file.h"
+#include "wux/cleanup_guard.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -56,20 +57,19 @@ Error readWhole(const char* path, std::vector<U8>& out,
         struct stat probe;
         return (::stat(path, &probe) != 0) ? Error::NotFound : Error::IoError;
     }
+    FileGuard file(fd);   // closed on every exit, a throwing insert included
     out.clear();
     for (;;) {
-        ssize_t n = ::read(fd, buf.data(), buf.size());
-        if (n < 0) { ::close(fd); return Error::IoError; }
+        ssize_t n = ::read(file.fd(), buf.data(), buf.size());
+        if (n < 0) return Error::IoError;
         if (n == 0) break;
         if (maxBytes != 0 && (U64)out.size() + (U64)n > maxBytes) {
-            ::close(fd);
             out.clear();
             if (tooLarge) *tooLarge = true;
             return Error::Truncated;
         }
         out.insert(out.end(), buf.data(), buf.data() + n);
     }
-    ::close(fd);
     return Error::Ok;
 }
 

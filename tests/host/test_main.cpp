@@ -31,6 +31,7 @@ int main() {
     testTicket();
     testKeyFile();
     testChecked();
+    testCleanup();
     if (g_failures) {
         std::printf("HOST TESTS FAILED: %d of %d checks\n", g_failures, g_checks);
         return 1;
