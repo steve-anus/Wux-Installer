@@ -59,6 +59,7 @@ DRC_SPLASH		:= meta/drc-splash.png
 CFLAGS	:=	-g -Wall -Wextra -Wshadow -Wformat=2 -Wformat-nonliteral \
 			-Wno-unused-parameter \
 			-O2 -ffunction-sections -fstack-protector-strong \
+			-ffile-prefix-map=$(HOME)=. \
 			$(MACHDEP)
 CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
 
@@ -147,7 +148,7 @@ else ifneq (,$(wildcard $(TOPDIR)/splash.png))
 	export APP_DRC_SPLASH := $(TOPDIR)/splash.png
 endif
 
-.PHONY: $(BUILD) clean all
+.PHONY: $(BUILD) clean all leakcheck
 
 #-------------------------------------------------------------------------------
 all: $(BUILD)
@@ -155,6 +156,21 @@ all: $(BUILD)
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+#-------------------------------------------------------------------------------
+# Release gate: the wuhb and the code inside it (the elf without debug info,
+# since the rpx stores its sections compressed) must not carry the builder's
+# home path or account name.
+leakcheck: $(BUILD)
+	@$(DEVKITPPC)/bin/powerpc-eabi-objcopy --strip-debug $(TARGET).elf $(BUILD)/leakcheck.elf
+	@for f in $(TARGET).wuhb $(BUILD)/leakcheck.elf; do \
+		if grep -a -q -F -e "$(HOME)" -e "$(USER)" "$$f"; then \
+			echo "leakcheck: $$f carries the builder's home path or account name" >&2; \
+			rm -f $(BUILD)/leakcheck.elf; exit 1; \
+		fi; \
+	done
+	@rm -f $(BUILD)/leakcheck.elf
+	@echo "leakcheck: $(TARGET).wuhb clean"
 
 #-------------------------------------------------------------------------------
 clean:

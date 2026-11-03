@@ -47,6 +47,18 @@ make
 The result is `wux_installer.wuhb`, along with `.rpx` and `.elf` files next to
 it. `make clean` removes build output.
 
+## Tests
+
+The code that reads and decrypts `.wux` images has host tests that run on a PC
+under AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```sh
+make -C tests/host
+```
+
+Before publishing a build, `make leakcheck` confirms that the `.wuhb` holds no
+path from your home folder and not your account name.
+
 ## Credits
 
 A big thanks goes out to [brienj](https://github.com/xhp-creations) for creating the original rpx port of WUP Installer GX2, [Gary](https://github.com/GaryOderNichts) for making the Wii U controller mod version, [Yardape8000](https://github.com/Yardape8000) for creating the [wup installer y mod](https://github.com/Yardape8000/wupinstaller) which WUP Installer GX2 was based on, [dimok](https://github.com/dimok789) who created the original apps HBL and Loadiine which use the same base, 
