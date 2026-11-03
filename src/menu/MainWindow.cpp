@@ -617,6 +617,7 @@ void MainWindow::OnWuxExtractFinished()
 		// folder selected by a previous flow could be installed and deleted by
 		// this one.
 		folderList->UnSelectAll();
+		size_t matched = 0;
 		for (size_t d = 0; d < result.outDirs.size(); ++d)
 		{
 			const std::string& outDir = result.outDirs[d];
@@ -630,7 +631,7 @@ void MainWindow::OnWuxExtractFinished()
 					path.erase(path.size() - 1);
 				if (!want.empty() && want[want.size() - 1] == '/')
 					want.erase(want.size() - 1);
-				if (path == want) { folderList->Select(i); break; }
+				if (path == want) { folderList->Select(i); ++matched; break; }
 			}
 		}
 
@@ -653,6 +654,9 @@ void MainWindow::OnWuxExtractFinished()
 			options.cleanupFiles = wux.cleanupFiles();
 			options.wuxFlow = true;
 			options.finalNote = wux.finalNote();
+			// A title that failed to extract, or a folder the list did not
+			// show, was never offered for install: keep the .wux for a retry.
+			options.sourceComplete = result.complete && matched == result.outDirs.size();
 			InstallWindow *window = new InstallWindow(folderList, options);
 			if (!window->isCreated())
 			{

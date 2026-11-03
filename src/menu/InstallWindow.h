@@ -35,6 +35,7 @@ public:
 		std::vector<std::string> cleanupFiles;
 		bool wuxFlow = false;
 		std::string finalNote;
+		bool sourceComplete = false; // every disc title was extracted and selected
 	};
 
 	InstallWindow(CFolderList * list, const InstallOptions & options);
@@ -92,6 +93,7 @@ private:
 	bool lastWasSkip;      // suppress the 6 s countdown after a skip
 	std::string lastGoodName; // name of the last installed title
 	bool wuxDeleteFailed;  // .wux/game.key cleanup failed (success note)
+	bool sourceComplete;   // the .wux may be deleted (see InstallOptions)
 	std::vector<std::string> cleanupFiles;   // .wux + game.key paths
 	std::string finalNote;     // extraction accounting for the final box
 	int target = NAND;         // set by the destination prompt before each title

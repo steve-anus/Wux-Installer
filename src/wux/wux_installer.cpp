@@ -919,6 +919,10 @@ Error WuxInstaller::extract(const char* wuxPath, const char* keyPath,
         }
 
         result.ok = true;
+        bool anyFailed = false;
+        for (size_t t = 0; t < titles.size(); ++t)
+            if (titles[t].error) anyFailed = true;
+        result.complete = !anyFailed && !titlesTruncated && !siDepthTruncated;
 
         // Non-fatal summary of what was skipped; never changes result.ok.
         if (!failedList.empty() || !h3List.empty() || siDepthTruncated || titlesTruncated) {

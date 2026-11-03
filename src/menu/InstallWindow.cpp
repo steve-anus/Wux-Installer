@@ -154,6 +154,7 @@ InstallWindow::InstallWindow(CFolderList * list, const InstallOptions & options)
 	, skippedCount(0)
 	, lastWasSkip(false)
 	, wuxDeleteFailed(false)
+	, sourceComplete(options.sourceComplete)
 	, cleanupFiles(options.cleanupFiles)
 	, finalNote(options.finalNote)
 	, boxClosing(false)
@@ -391,12 +392,17 @@ void InstallWindow::executeThread()
 		if(installedCount > 0)
 		{
 			// The .wux image and game.key (in /wudump) are removed after the
-			// last processed title, but only if something really installed
-			// (retry-friendly otherwise). common.key is never in
-			// cleanupFiles. A failed POSIX unlink (the same layer that removes
-			// the extracted /install folders) falls back to the coreinit FS
-			// client; both outcomes are logged for the hardware debug.
-			if(deleteWuxFiles)
+			// last processed title, only when every installable title on the
+			// disc installed: a failed install stops the chain before this
+			// point (canceled), and sourceComplete is false when a title
+			// failed to extract. common.key is never in cleanupFiles. A
+			// failed POSIX unlink (the same layer that removes the extracted
+			// /install folders) falls back to the coreinit FS client; both
+			// outcomes are logged for the hardware debug.
+			bool wuxKept = deleteWuxFiles && !sourceComplete;
+			if(wuxKept)
+				log_printf("InstallWindow: kept .wux and game.key, not every title was extracted");
+			if(deleteWuxFiles && sourceComplete)
 			{
 				for(size_t i = 0; i < cleanupFiles.size(); ++i)
 				{
@@ -416,6 +422,8 @@ void InstallWindow::executeThread()
 			std::string note;
 			if(wuxDeleteFailed)
 				note = "Could not delete the .wux / game.key from the SD card, remove them manually.";
+			if(wuxKept)
+				note = "Kept the .wux and game.key: not every title on the disc installed.";
 			if(deleteFoldersFailed)
 			{
 				if(!note.empty())

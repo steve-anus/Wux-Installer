@@ -35,6 +35,9 @@ struct ExtractResult {
     std::string note;               // non-fatal accounting info (e.g. partial success)
     std::vector<std::string> outDirs;   // all <outRoot>/<TITLEID> folders
     int titleCount = 0;
+    // Every title the disc lists was extracted: none failed and no title
+    // list or SI FST was cut short. The .wux is deleted only when this holds.
+    bool complete = false;
 };
 
 // Progress callback, called for every 32 KB chunk written to a .app file,
