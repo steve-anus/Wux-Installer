@@ -26,7 +26,7 @@ public:
 	// of failing the chain - they are the extraction's own output and the
 	// console already ships them on NAND.
 	// finalNote: non-fatal extraction accounting (e.g. "extracted 2 of 3
-	// titles") appended to the final success message.
+	// titles") shown in the final box, success or nothing installed.
 	struct InstallOptions
 	{
 		bool deleteAfterInstall = false;

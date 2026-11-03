@@ -25,7 +25,7 @@ namespace wux {
 
 // Result of a .wux extraction. A disc can hold several titles (e.g. the game
 // plus the 00050010-10060000 "rear.rpx" dummy); one folder is produced per
-// title and all of them are installable.
+// title. The installer decides which categories it installs.
 struct ExtractResult {
     bool ok = false;
     U64 titleID = 0;                // first extracted title
