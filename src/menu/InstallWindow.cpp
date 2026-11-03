@@ -473,13 +473,14 @@ void InstallWindow::executeThread()
 			// Every selected folder was a non-installable title.
 			std::string msg = "No installable titles found (games, updates, DLC, demos and version titles install).";
 			if(!wuxFlow && !skippedNames.empty())
-			{
 				msg += " Not installable: " + joinSkipped();
-				if(msg.size() > 120)
-				{
-					msg.resize(117);
-					msg += "...";
-				}
+			// Extraction accounting (e.g. a title that failed to extract).
+			if(!finalNote.empty())
+				msg += " " + finalNote;
+			if(msg.size() > 120)
+			{
+				msg.resize(117);
+				msg += "...";
 			}
 			messageBox->stageReload("Install failed", "", msg,
 			                   MessageBox::BT_OK, MessageBox::IT_ICONERROR);
