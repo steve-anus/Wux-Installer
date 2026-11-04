@@ -39,8 +39,7 @@ bool allHex(const std::vector<U8>& v) {
 }
 
 const char* const kTruncatedHex =
-    "16 hex characters - looks like a truncated 32-char hex key "
-    "(enter all 32 characters, or save the raw 16 bytes)";
+    "16 hex characters - looks like a truncated 32-char hex key";
 
 } // namespace
 
@@ -114,7 +113,7 @@ Error parseKeyBytes(const std::vector<U8>& raw, std::vector<U8>& key,
         }
         return Error::Ok;
     }
-    if (reason) *reason = "expected 16 raw bytes or a 32-character hex string, got " + std::to_string(clean.size()) + " byte(s)";
+    if (reason) *reason = "got " + std::to_string(clean.size()) + " byte(s)";
     return Error::MissingKey;
 }
 

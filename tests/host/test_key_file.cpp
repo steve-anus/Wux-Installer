@@ -30,9 +30,11 @@ void testKeyFile() {
         std::vector<unsigned char> raw(text.begin(), text.end());
         CHECK(wux::parseKeyBytes(raw, key) == wux::Error::MissingKey);
     }
-    {
+    {   // the caller appends the accepted formats, so the reason gives only the count
         std::vector<unsigned char> raw(15, 0x41);
-        CHECK(wux::parseKeyBytes(raw, key) == wux::Error::MissingKey);
+        std::string why;
+        CHECK(wux::parseKeyBytes(raw, key, &why) == wux::Error::MissingKey);
+        CHECK(why == "got 15 byte(s)");
     }
     {   // a key file over 4096 bytes is refused before parsing
         std::string p = tempPath("big.key");
