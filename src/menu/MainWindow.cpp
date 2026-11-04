@@ -39,7 +39,7 @@ MainWindow::MainWindow(int w, int h)
 	, titleImgData(Resources::GetImageData("titleHeader.png"))
 	, titleImg(titleImgData)
 	, titleText("Wux Installer")
-	, versionText("V1.0")
+	, versionText(WUX_INSTALLER_VERSION)
 {
 	folderList = NULL;
 	wuxButton = NULL;
@@ -382,7 +382,7 @@ void MainWindow::SetDrcHeader()
 	versionText.setPosition(-15, -40);
 	versionText.setBlurGlowColor(5.0f, glm::vec4(0.0, 0.0, 0.0f, 1.0f));
 	versionText.setAlignment(ALIGN_RIGHT | ALIGN_TOP);
-	versionText.setText("V1.0");
+	versionText.setText(WUX_INSTALLER_VERSION);
 	
 	headerFrame.setSize(titleImg.getWidth(), titleImg.getHeight());
 	headerFrame.setPosition(0, 310);
