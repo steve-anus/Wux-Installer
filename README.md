@@ -72,5 +72,3 @@ as well as the original wupinstaller, [Maschell](https://github.com/Maschell) fo
 Also thanks to [Fangal-airbag](https://github.com/Fangal-airbag) for the .wuhb port.
 
 AES decryption uses [tiny-AES-c](https://github.com/kokke/tiny-AES-c) by kokke, released into the public domain (`src/wux/third_party/tiny-aes`).
-
-Current maintenance by [steve-anus](https://github.com/steve-anus).
