@@ -72,3 +72,11 @@ as well as the original wupinstaller, [Maschell](https://github.com/Maschell) fo
 Also thanks to [Fangal-airbag](https://github.com/Fangal-airbag) for the .wuhb port.
 
 AES decryption uses [tiny-AES-c](https://github.com/kokke/tiny-AES-c) by kokke, released into the public domain (`src/wux/third_party/tiny-aes`).
+
+## AI disclosure
+
+The code this fork adds to WUP Installer GX2 was written by AI coding
+assistants. The maintainer made key design decisions and tested the
+builds on real hardware, but did not write the code. The original WUP
+Installer GX2 code and the third-party libraries are the work of the
+people credited above.
